@@ -1,0 +1,17 @@
+/* static/admin/ai/arm_solve/tasks_status.css */
+/*
+  Здесь стили для отображения статуса задачи древа
+*/
+
+.arm-tree-task-good {
+  color: rgb(6, 118, 71);
+}
+
+.arm-tree-task-bad {
+  color: rgb(179, 0, 0);
+}
+
+/* Серый: посылок не было либо флаги ещё не заполнялись. */
+.arm-tree-task-undefined {
+  color: #6b7280;
+}

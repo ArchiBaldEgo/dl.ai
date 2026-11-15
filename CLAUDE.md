@@ -25,6 +25,8 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   (`tests.py::test_ollama_table_and_registry_in_sync`) green — it guards this rule.
 - **DRY.** Import, don't copy. Canonical owners:
   - grading/answer comparison → `ai/grading.py` (deterministic difflib, no LLM-judge);
+  - каталог кодов ошибок «В чём ошибка?» и суффикс `КОДЫ:` →
+    `ai/services/find_error_catalog.py`; парсинг/сравнение кодов → `ai/grading.py`;
   - prompt visibility: all prompts visible READ-ONLY to every admin entrant (baseline
     `page.prompt_admin_all`); overwriting someone else's prompt is gated by
     `page.prompt_admin.edit_others` (`PromptAdmin._can_edit_prompt`). Chat-facing APIs
@@ -36,8 +38,9 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   - HTTP headers/Puppeteer-пул-протокол → `ai/model_clients/_base.py` (`bearer_headers`,
     `proxy_bypass_session`, `make_table_handlers`, `BotPoolClient`); `web_deepseek.py` /
     `web_kimi.py` — тонкие конфиги, новый web-пул = конфиг, не копия;
-  - поиск человека (id точно / «Фамилия Имя» / «Имя Фамилия» / инициалы) →
-    `ai/services/user_search.py` (+ changelist-миксин `ai/admin/search.py`);
+  - поиск человека (id точно, в т.ч. `id_12345` / «Фамилия Имя» / «Имя
+    Фамилия» / инициалы) → `ai/services/user_search.py` (+ changelist-миксин
+    `ai/admin/search.py`);
   - identity для `AIRequestLog` → `ai/services/auth.py::get_user_identity_for_log`;
   - DL verdict из комментария → `ai/dl_api_client.py::dl_verdict_from_comment`
     (fail-маркеры приоритетнее success; нераспознанное → failed);
@@ -46,10 +49,18 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   - входные/эталонные данные DL-тестов (нормализация `\r\n`, обрезка, разбор
     сохранённых снапшотов) → `ai/services/dl_test_data.py` (единственный владелец;
     ARM и «Реши задачу» импортируют оттуда);
+  - загрузка PDF в чат (строгая валидация magic/активного содержимого,
+    извлечение только текста, гейт «только модель со зрением») →
+    `ai/services/pdf_upload.py`;
   - доступ к личным AI-моделям (свои/shared/public, поиск получателя, правка
     доступа суперюзером) → `ai/services/user_models.py` + `ai/services/
     user_directory.py` (DL-id/ФИО); ключи/endpoint'ы чужих моделей суперюзеру
     не показываются;
+  - авто-роль «Разработчик» при поручении таска (поиск исполнителя
+    `tasks/users/search/`, зачисление при назначении, снятие после закрытия
+    последнего активного таска) → `ai/services/task_developers.py`; маркер
+    `AIDevTaskDeveloperGrant` отделяет авто-членство от ручного («Группы
+    доступа»), ручное автоматика не снимает;
   - identity `AIRequestLog`/`get_user_identity_for_log` см. выше; capability-метаданные
     (Text/Vision/Reasoning) живут в `registry.py`, НЕ в DB.
 - **Encapsulation.** `ConversationHistory.get()` — defensive copy, не мутировать;
@@ -94,12 +105,24 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   source of truth; батч-солв, перезапуски пар, карвер кода — gotchas-deep.
   Подписи модели (`Код:`, `**Код**:`, `Функция main():` и т. п.) вычищает
   `code_carver.strip_prose_heading_lines` (оба режима + финальный гейт всех языков).
+- База ошибочных программ «В чём ошибка?» — `FindErrorCaseGroup` →
+  `FindErrorCase` → `FindErrorCaseLabel` (`ai/models.py`), импорт из датасета
+  `ai/management/commands/import_find_error_cases.py` (идемпотентный, cp1251-aware),
+  админка `ai/admin/find_error_cases.py`; каталог кодов — единственный
+  `ai/services/find_error_catalog.py`.
+- Лаборатория промптов — `ai/prompt_lab_runner.py` (`PromptLabRun`/`PromptLabResult`,
+  потоки по моделям, live-прогресс в памяти, БД — source of truth) + страница
+  `ai/admin/prompt_lab.py`/`ai/templates/admin/ai/prompt_lab.html`; метрики кодов
+  считает `ai/grading.py` (`parse_error_codes`/`compare_error_codes`/
+  `aggregate_error_code_metrics`, детерминированно, без LLM-judge).
 - Журнал запросов — `ai/admin/request_logs.py` (`/ai/admin/ai/request_logs/`;
   `request_logs.html` скелет + партиал `request_logs_table.html`, AJAX меняет обёртку
   целиком; JS на делегировании).
 - Онбординг-wizard — `ai/services/onboarding.py` + движок `static/admin/js/ai-wizard.js`;
   правило «каждый видел тур», бамп `WIZARD_VERSION` — gotchas-deep.
-- Templates: `ai/templates/ai/` (юзер-страницы), `ai/templates/admin/ai/` (админка); статик
+- Templates: `ai/templates/ai/` (юзер-страницы; шапка всех клиентских страниц —
+  единый partial `_top_panel.html`, активный режим — контекст `active_page`),
+  `ai/templates/admin/ai/` (админка); статик
   в `static/admin/js/`: `chat_template.js` (только чат), `decide_task.js`/`find_error.js`
   self-contained, `ai_processes.js` (меню «Процессы» через `admin/base_site.html`),
   `test_console.js`.
@@ -142,6 +165,13 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
   `+ timedelta(hours=3)`.
 - Model selector: топ-1 фаворит юзера (`_get_user_top_model_keys`, gated `AIAppSettings.
   favorites_epoch`) первой, дальше строго алфавит по title.
+- `ExternalAuthMiddleware` — stale-while-revalidate: кэш identity отдаётся сразу,
+  dl.gsu.by обновляется фоновым daemon-потоком (L2 `django.core.cache`, lock +
+  tombstone на 401); блокирующий запрос — только когда кэша нет вовсе
+  (`AI_AUTH_CACHE_TTL` / `AI_AUTH_STALE_TTL`). Не возвращать блокировку на каждый запрос.
+- История клиентских страниц — ОДИН ключ `ai_msgs_<client_id>` (чат / «Реши задачу» /
+  «В чём ошибка»); старые per-page ключи мигрирует `_migrateLegacyMessages`. `[[DL]]`-
+  записи рендерит только страница с `_appendDlMessage` (`_canRenderPersistedEntry`).
 
 ## Update log / git hooks
 

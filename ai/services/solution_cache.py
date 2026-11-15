@@ -92,6 +92,47 @@ def find_passed_solution(node_id, programming_language_id):
     ).first()
 
 
+def find_topic_example(programming_language_id, topic_id=None, topic_name="",
+                       exclude_node_id=None):
+    """Ранее принятое решение по ТЕМЕ — образец (few-shot) для batch-прогона.
+
+    Тот же язык; тема — по ``topic_id`` (приоритет), иначе по имени без учёта
+    регистра. Текущий узел исключается. Возвращает ``TaskSolution`` или None;
+    без языка/темы пример не ищем (иначе подсунули бы решение из чужой темы).
+    """
+    if not programming_language_id:
+        return None
+    topic_name = (topic_name or "").strip()
+    if not topic_id and not topic_name:
+        return None
+    base = TaskSolution.objects.filter(
+        programming_language_id=programming_language_id,
+        verdict=TaskSolution.VERDICT_PASSED,
+    ).exclude(code="")
+    if exclude_node_id:
+        base = base.exclude(task_node_id=exclude_node_id)
+    if topic_id:
+        queryset = base.filter(topic_id=topic_id)
+    else:
+        queryset = base.filter(topic_name__iexact=topic_name)
+    ordered = queryset.order_by("-updated_at", "-pk").only(
+        "task_node_id", "topic_name", "code", "file_extension", "updated_at",
+    )
+    found = ordered.first()
+    if found is None and not topic_id:
+        # SQLite не умеет регистронезависимое сравнение кириллицы (LIKE/iexact
+        # работают только для ASCII); в Postgres сюда не попадаем. Страховка
+        # на уровне Python сохраняет одинаковый контракт на обеих БД.
+        folded = topic_name.casefold()
+        for row in base.order_by("-updated_at", "-pk").only(
+            "task_node_id", "topic_name", "code", "file_extension", "updated_at",
+        ):
+            if (row.topic_name or "").casefold() == folded:
+                found = row
+                break
+    return found
+
+
 def record_submission(node_id, code, *, programming_language_id=None, file_extension="",
                       course_id=None, identity=None, queue_id=None, test_log=None,
                       session_id=None):

@@ -6,6 +6,7 @@ from django.template.response import TemplateResponse
 from django.utils import timezone
 
 from ..constants import MOSCOW_TZ
+from ..model_clients.registry import IMPLEMENTED_CAPABILITIES
 from ..model_health import (
     get_available_model_options,
     get_health_window_date,
@@ -16,30 +17,32 @@ from ..model_health import (
 )
 from .permissions import can_access_model_status
 
-# Три состояния бейджа способности модели:
-#   cap-on        — способность есть, модель активна (зелёный);
-#   cap-inactive  — способность есть, но модель сейчас НЕ активна
-#                   (зелёный зачёркнутый);
-#   cap-off       — способности нет (серый зачёркнутый).
+# Три состояния бейджа способности модели (НЕ зависит от доступности модели —
+# она показана отдельной колонкой «Состояние»):
+#   cap-on              — способность есть у модели И реализована в приложении
+#                         (зелёный);
+#   cap-on cap-unimplemented — способность есть у модели, но в приложении НЕ
+#                         реализована (зелёный зачёркнутый);
+#   cap-off             — у модели способности нет (серый зачёркнутый).
 # Логика одна и та же для серверного рендера и для JS-обновления таблицы:
 # считается здесь и отдаётся готовыми классами (cap_classes).
 _CAPABILITY_KEYS = ("text", "vision", "reasoning")
 # Состояние бейджа → (CSS-классы, подсказка). «Зелёный зачёркнутый» — это
-# зелёный бейдж (cap-on) с классом зачёркивания (cap-inactive).
+# зелёный бейдж (cap-on) с классом зачёркивания (cap-unimplemented).
 _CAP_BADGES = {
-    "on": ("cap-on", "Способность есть, модель активна"),
-    "inactive": ("cap-on cap-inactive", "Способность есть, но модель сейчас неактивна"),
-    "off": ("cap-off", "Способности нет"),
+    "on": ("cap-on", "Есть у модели и реализовано в приложении"),
+    "unimplemented": ("cap-on cap-unimplemented", "Есть у модели, но в приложении не реализовано"),
+    "off": ("cap-off", "У модели нет"),
 }
 
 
-def _capability_badge(has_capability: bool, is_active: bool) -> dict:
+def _capability_badge(has_capability: bool, implemented: bool) -> dict:
     if not has_capability:
         state = "off"
-    elif is_active:
+    elif implemented:
         state = "on"
     else:
-        state = "inactive"
+        state = "unimplemented"
     css_class, title = _CAP_BADGES[state]
     return {"class": css_class, "title": title}
 
@@ -49,11 +52,12 @@ def _with_capability_badges(rows):
     enriched = []
     for row in rows:
         caps = row.get("capabilities") or {}
-        is_active = bool(row.get("is_active"))
         enriched.append({
             **row,
             "cap_classes": {
-                key: _capability_badge(bool(caps.get(key)), is_active)
+                key: _capability_badge(
+                    bool(caps.get(key)), bool(IMPLEMENTED_CAPABILITIES.get(key))
+                )
                 for key in _CAPABILITY_KEYS
             },
         })

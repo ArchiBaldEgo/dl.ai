@@ -22,6 +22,14 @@ Handler = Callable[..., Coroutine]
 _TEXT_ONLY = {"text": True, "vision": False, "reasoning": False}
 # Reasoning / "thinking" models: text-only but advertised as reasoning-capable.
 _REASONING = {"text": True, "vision": False, "reasoning": True}
+# Multimodal thinking models (image/video input + reasoning output).
+_VISION_REASONING = {"text": True, "vision": True, "reasoning": True}
+
+#: Возможности, РЕАЛИЗОВАННЫЕ в приложении (не «рекламируемые» моделью).
+#: Страница «Состояние моделей» различает три состояния: есть и работает /
+#: есть у модели, но не реализовано / нет. Менять только вместе с кодом,
+#: который реально реализует возможность.
+IMPLEMENTED_CAPABILITIES = {"text": True, "vision": True, "reasoning": True}
 
 # Модель по умолчанию для селектора на страницах AI: предвыбирается, когда у
 # пользователя нет своего топ-1 фаворита (см. views._render_ai_page).
@@ -87,6 +95,9 @@ _MODELS: Dict[str, Dict[str, object]] = {
         "title": "OR Nemotron Nano 30B Reasoning",
         "handler": openrouter.ask_OR_Nemotron_Nano_30B_Reasoning_async,
         "capabilities": _REASONING,
+        # Модель заявляет reasoning, но handler OpenRouter читает только
+        # message.content: reasoning_content в приложение не попадает.
+        "implemented": {"reasoning": False},
     },
     "OR_Nemotron_Nano_30B": {
         "title": "OR Nemotron Nano 30B",
@@ -117,42 +128,50 @@ _MODELS: Dict[str, Dict[str, object]] = {
     "Ollama_Glm_5_3_Flash_Cloud": {
         "title": "Ollama GLM 5.3 Flash",
         "handler": ollama.ask_Ollama_Glm_5_3_Flash_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # glm-5.3-flash:cloud — мультимодальная (изображения/видео) + thinking.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_Glm_5_2_Cloud": {
         "title": "Ollama GLM 5.2",
         "handler": ollama.ask_Ollama_Glm_5_2_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # glm-5.2:cloud — thinking, но без зрения (text-only).
+        "capabilities": _REASONING,
     },
     "Ollama_DeepSeek_V4_1_Flash_Cloud": {
         "title": "Ollama DeepSeek 4.1 Flash",
         "handler": ollama.ask_Ollama_DeepSeek_V4_1_Flash_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # deepseek-v4.1-flash:cloud — vision + thinking.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_DeepSeek_V4_Pro_Cloud": {
         "title": "Ollama DeepSeek V4 Pro",
         "handler": ollama.ask_Ollama_DeepSeek_V4_Pro_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # deepseek-v4-pro:cloud — thinking, но без зрения (text-only).
+        "capabilities": _REASONING,
     },
     "Ollama_Gemma_4_Cloud": {
         "title": "Ollama Gemma 4",
         "handler": ollama.ask_Ollama_Gemma_4_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # gemma4:cloud — текст + изображения, thinking переключаемый.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_Nemotron_3_Super_Cloud": {
         "title": "Ollama Nemotron 3 Super",
         "handler": ollama.ask_Ollama_Nemotron_3_Super_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # nemotron-3-super:cloud — text-only reasoning.
+        "capabilities": _REASONING,
     },
     "Ollama_Kimi_K2_7_Code_Cloud": {
         "title": "Ollama Kimi K2.7 Code",
         "handler": ollama.ask_Ollama_Kimi_K2_7_Code_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # kimi-k2.7-code:cloud — нативное мультимодальное зрение + thinking.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_Kimi_K2_6_Cloud": {
         "title": "Ollama Kimi K2.6",
         "handler": ollama.ask_Ollama_Kimi_K2_6_Cloud_async,
-        "capabilities": _TEXT_ONLY,
+        # kimi-k2.6:cloud — текст + изображения, thinking.
+        "capabilities": _VISION_REASONING,
     },
     "Ollama_Gpt_Oss_20B_Cloud": {
         "title": "Ollama GPT-OSS 20B",
@@ -171,7 +190,14 @@ _MODELS: Dict[str, Dict[str, object]] = {
     "Ollama_MiniMax_M3_1_Flash_Cloud": {
         "title": "Ollama MiniMax M3.1 Flash",
         "handler": ollama.ask_Ollama_MiniMax_M3_1_Flash_Cloud_async,
-        # minimax-m3.1-flash:cloud умеет thinking отдельным полем — reasoning.
+        # minimax-m3.1-flash:cloud — image/video input + reasoning.
+        "capabilities": _VISION_REASONING,
+    },
+    "Ollama_Beam_Cloud": {
+        "title": "Ollama Beam",
+        "handler": ollama.ask_Ollama_Beam_Cloud_async,
+        # beam:cloud (Reflection, 501B MoE / 23B active) — reasoning + tools,
+        # мультимодальности нет: «Text in, text out».
         "capabilities": _REASONING,
     },
 }
@@ -328,6 +354,23 @@ class ModelRegistry:
             "vision": bool(caps.get("vision", False)),
             "reasoning": bool(caps.get("reasoning", False)),
         }
+
+    def implemented(self, key: str) -> dict:
+        """Which declared capabilities are actually wired in the application.
+
+        Defaults to ``capabilities(key)``; a model may override individual
+        flags in its registry row via ``"implemented": {"reasoning": False}``.
+        Used by «Состояние моделей» to show «заявлено, но не подключено»
+        without confusing it with the model's current health.
+        """
+        implemented = dict(self.capabilities(key))
+        info = self._models.get(key)
+        overrides = info.get("implemented") if info else None
+        if isinstance(overrides, dict):
+            for key_name in ("text", "vision", "reasoning"):
+                if key_name in overrides:
+                    implemented[key_name] = bool(overrides[key_name])
+        return implemented
 
     def register(self, key: str, title: str, handler: Handler, capabilities: dict | None = None) -> None:
         self._models[key] = {

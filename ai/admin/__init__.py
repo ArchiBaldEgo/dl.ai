@@ -11,6 +11,8 @@ from ..models import (
     AuthorAlias,
     DLEducationName,
     ExternalDLAccount,
+    FindErrorCase,
+    FindErrorCaseGroup,
     ProgrammingLanguage,
     Prompt,
     AIWizardSeen,
@@ -36,6 +38,7 @@ from .models import (
     UpdateLogAdmin,
 )
 from .forms import PromptForm, SharedPromptForm
+from .find_error_cases import FindErrorCaseAdmin, FindErrorCaseGroupAdmin
 from .request_logs import AIRequestLogAdmin, admin_request_log_detail_view, admin_request_logs_view, resend_request_view
 from ..models import AIRequestLog
 from .arm import (
@@ -65,6 +68,8 @@ __all__ = [
     "SharedPromptAdmin",
     "TaskAdmin",
     "TaskSolutionAdmin",
+    "FindErrorCaseAdmin",
+    "FindErrorCaseGroupAdmin",
     "UpdateLogAdmin",
     "PromptForm",
     "SharedPromptForm",
@@ -94,6 +99,10 @@ ai_admin_site.register(Prompt, PromptAdmin)
 ai_admin_site.register(SharedPrompt, SharedPromptAdmin)
 ai_admin_site.register(ExternalDLAccount, ExternalDLAccountAdmin)
 ai_admin_site.register(TaskSolution, TaskSolutionAdmin)
+# База ошибочных программ режима «В чём ошибка?» (открывается ключом
+# page.prompt_lab — тот же, что у лаборатории промптов).
+ai_admin_site.register(FindErrorCaseGroup, FindErrorCaseGroupAdmin)
+ai_admin_site.register(FindErrorCase, FindErrorCaseAdmin)
 # NOTE: AIWizardSeen — листинг «кто видел онбординг-wizard» (только суперюзер);
 # удаление строки перезапускает тур этого scope конкретному пользователю.
 ai_admin_site.register(AIWizardSeen, AIWizardSeenAdmin)

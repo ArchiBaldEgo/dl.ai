@@ -171,7 +171,10 @@ class Bot {
         // Инициализация: запуск Chrome, настройка stealth-плагина, прокси, логин.
         ensureStealth();
 
-        const headless = toBool(process.env[this._env('HEADLESS')], false) ? 'new' : false;
+        // По умолчанию headless: в проде нет X-сервера, headed-Chrome падает
+        // с «Missing X server or $DISPLAY» и бот не инициализируется. Видимый
+        // режим — только явно: HEADLESS=false / KIMI_HEADLESS=false (seed-логин).
+        const headless = toBool(process.env[this._env('HEADLESS')], true) ? 'new' : false;
         const { server: proxyServerRaw, user: proxyUser, pass: proxyPass } = resolveProxy(this.site);
         let proxyServer = proxyServerRaw;
         log(`[bot#${this.id}] proxy configured: ${proxyServer ? 'yes' : 'no'}`);

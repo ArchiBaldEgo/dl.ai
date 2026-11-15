@@ -965,6 +965,7 @@ _DL_SUCCESS_MARKERS_RE = re.compile(
 
 DL_VERDICT_SOLVED = "solved"
 DL_VERDICT_FAILED = "failed"
+DL_VERDICT_NONE   = None
 
 # Маркеры ОШИБКИ КОМПИЛЯЦИИ. Проверяются ПЕРВЫМИ: комментарий «Ошибка
 # компиляции в строке 5» — это про компиляцию, а не про неверный ответ,
@@ -1156,6 +1157,7 @@ def get_solutions_from_dl(
     include_incorrect: bool = True,
     start_date: str = "",
     end_date: str = "",
+    timeout: int = 30,
 ) -> dict[str, Any]:
     """Fetch list of solutions for a task from DL.
 
@@ -1166,6 +1168,8 @@ def get_solutions_from_dl(
     ``extension`` is the file extension WITHOUT a leading dot (e.g. "cpp",
     "pas", "java"); when empty, solutions with any extension are returned.
     Dates use the 'YYYY-MM-DD' or 'YYYY-MM-DD HH:mm:ss' format.
+    ``timeout`` — HTTP-таймаут запроса (секунды); прогон флагов дерева ARM
+    передаёт меньше 30, чтобы зависший DL не растягивал пакет узлов.
     """
     payload: dict[str, Any] = {
         "sessionId": session_id,
@@ -1185,6 +1189,7 @@ def get_solutions_from_dl(
         "POST",
         "/restapi/get-solutions",
         json=payload,
+        timeout=timeout,
     )
 
     _raise_for_status(response)

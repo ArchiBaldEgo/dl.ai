@@ -68,6 +68,12 @@ _CHAPTERS = {
         source=("docx", "Инструкция для разработчика промптов"),
         min_role="prompt_developer",
     ),
+    "find-error-prompt": DocChapter(
+        slug="find-error-prompt",
+        title="Разработчику препромпта «В чём ошибка»",
+        source=("file", "docs/find_error_prompt.md"),
+        min_role="prompt_developer",
+    ),
     "developer": DocChapter(
         slug="developer",
         title="Документация для разработчика",
@@ -89,6 +95,20 @@ def get_chapter(slug: str) -> Optional[DocChapter]:
 
 def all_chapters() -> list[DocChapter]:
     return list(_CHAPTERS.values())
+
+
+#: Главы клиентской модалки «?» (шапка чата/«Реши задачу»/«В чём ошибка»),
+#: в порядке вкладок. «user» доступна всем; остальные — только тем, кому
+#: открыта промпт-документация (проверка прав — в ai/views.py).
+CLIENT_HELP_SLUGS = ("user", "find-error-prompt")
+
+
+def chapter_title(slug: str, lang: str = "ru") -> str:
+    """Заголовок главы для вкладок/модалки (``user`` локализуется)."""
+    chapter = _CHAPTERS.get(slug)
+    if chapter is None:
+        raise DocUnavailableError(f"Неизвестная глава: {slug}")
+    return _chapter_title(chapter, lang)
 
 
 def _base_dir() -> Path:

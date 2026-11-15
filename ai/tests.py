@@ -40,13 +40,20 @@ from ai.i18n import get_localized_name, get_ui_language_suffix
 from ai.external_account import get_or_create_user_from_external
 from ai.models import (
     AuthorAlias,
+    AIAccessGroup,
     AIDevTask,
+    AIDevTaskDeveloperGrant,
     AIRequestLog,
     AIPinnedBatchRun,
     AIWizardSeen,
     ArmPromptBinding,
     ExternalDLAccount,
+    FindErrorCase,
+    FindErrorCaseGroup,
+    FindErrorCaseLabel,
     ProgrammingLanguage,
+    PromptLabResult,
+    PromptLabRun,
     Prompt,
     SharedPrompt,
     Task,
@@ -166,6 +173,8 @@ class ChatViewTests(SimpleTestCase):
 @override_settings(SESSION_ENGINE="django.contrib.sessions.backends.signed_cookies")
 class ExternalAuthMiddlewareTests(TestCase):
     def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # L2-кэш авторизации не должен протекать между тестами
         self.factory = RequestFactory()
         self.middleware = ExternalAuthMiddleware(lambda req: HttpResponse("ok"))
         self.user_model = get_user_model()
@@ -252,8 +261,9 @@ class ExternalAuthMiddlewareTests(TestCase):
         fetch_user_info.assert_not_called()
         self.assertEqual(request.user_info, {"userId": "42"})
 
-    def test_stale_cached_user_info_revalidates_dlsid(self):
-        # Кэш старше TTL → middleware заново проверяет DLSID через внешний API.
+    def test_stale_cached_user_info_revalidates_dlsid_in_background(self):
+        # Кэш старше TTL → ревалидация DLSID запускается в ФОНЕ; запрос
+        # отдаёт stale-кэш немедленно и не ждёт dl.gsu.by.
         from ai.models import ExternalDLAccount
         u = self.user_model.objects.create_user(username="user_42b", password="x")
         ExternalDLAccount.objects.create(user=u, external_user_id="42")
@@ -268,39 +278,55 @@ class ExternalAuthMiddlewareTests(TestCase):
 
         with patch(
             "ai.middleware.fetch_external_user_info",
-            return_value={"userId": "42", "login": "alice"},
-        ) as fetch_user_info:
+            side_effect=AssertionError("request path must not call dl.gsu.by"),
+        ) as fetch_user_info, patch.object(
+            self.middleware, "_schedule_user_info_refresh"
+        ) as schedule_refresh:
             response = self.middleware(request)
 
         self.assertEqual(response.status_code, 200)
-        fetch_user_info.assert_called_once()
-        # Кэш обновлён свежим user_info и свежим timestamp.
-        self.assertEqual(request.session["external_user_info"], {"userId": "42", "login": "alice"})
+        fetch_user_info.assert_not_called()
+        schedule_refresh.assert_called_once_with("session-123")
+        self.assertEqual(request.user_info, {"userId": "42"})
 
-    def test_unavailable_external_api_falls_back_to_stale_cache(self):
-        # dl.gsu.by недоступен, но есть свежий кэш → graceful degradation,
-        # доступ сохраняется (не 503).
-        from ai.models import ExternalDLAccount
+    def test_background_refresh_updates_l2_cache(self):
+        from ai.middleware import ExternalAuthMiddleware
+
+        with patch(
+            "ai.middleware.fetch_external_user_info",
+            return_value={"userId": "42", "login": "alice"},
+        ):
+            self.middleware._refresh_user_info("session-123", "lock-key")
+
+        cached, fetched_at = self.middleware._load_external_user_info("session-123")
+        self.assertEqual(cached, {"userId": "42", "login": "alice"})
+        self.assertGreater(fetched_at, 0)
+
+    def test_background_unauthorized_sets_tombstone(self):
+        from django.core.cache import cache
+        from ai.external_auth import ExternalAuthUnauthorized
+
+        with patch(
+            "ai.middleware.fetch_external_user_info",
+            side_effect=ExternalAuthUnauthorized("revoked"),
+        ):
+            self.middleware._refresh_user_info("session-123", "lock-key")
+
+        key = self.middleware._invalid_cache_key("session-123")
+        self.assertTrue(cache.get(key))
+
+    def test_unavailable_background_refresh_keeps_stale_cache(self):
         from ai.external_auth import ExternalAuthUnavailable
-        u = self.user_model.objects.create_user(username="user_42c", password="x")
-        ExternalDLAccount.objects.create(user=u, external_user_id="42")
 
-        request = self.factory.get("/ai/admin/")
-        self._add_session(request)
-        request.COOKIES["DLSID"] = "session-123"
-        request.session["external_session_id"] = "session-123"
-        request.session["external_user_info"] = {"userId": "42"}
-        # Протухший кэш провоцирует ревалидацию, которая упадёт с Unavailable.
-        request.session["external_user_info_fetched_at"] = time.time() - 3600
-
+        self.middleware._cache_external_user_info("session-123", {"userId": "42"})
         with patch(
             "ai.middleware.fetch_external_user_info",
             side_effect=ExternalAuthUnavailable("dl.gsu.by down"),
         ):
-            response = self.middleware(request)
+            self.middleware._refresh_user_info("session-123", "lock-key")
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(request.user_info, {"userId": "42"})
+        cached, _ = self.middleware._load_external_user_info("session-123")
+        self.assertEqual(cached, {"userId": "42"})
 
     def test_unavailable_external_api_returns_503_without_cache(self):
         # dl.gsu.by недоступен И кэша нет → 503 (некому предоставить доступ).
@@ -1900,6 +1926,199 @@ class ModelCapabilitiesTests(SimpleTestCase):
             self.assertEqual(set(caps.keys()), {"text", "vision", "reasoning"})
             for value in caps.values():
                 self.assertIsInstance(value, bool)
+
+
+class PdfUploadServiceTests(SimpleTestCase):
+    """Строгая загрузка PDF: magic-байты, шифрование, активное содержимое, текст."""
+
+    @staticmethod
+    def _blank_pdf(encrypt=None, open_action=False):
+        import io
+        from pypdf import PdfWriter
+        from pypdf.generic import DictionaryObject, NameObject
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        if open_action:
+            writer._root_object[NameObject("/OpenAction")] = DictionaryObject()
+        if encrypt:
+            writer.encrypt(encrypt)
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        return buffer.getvalue()
+
+    @staticmethod
+    def _upload(name, data, content_type="application/pdf"):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        return SimpleUploadedFile(name, data, content_type=content_type)
+
+    def test_rejects_non_pdf_extension_and_magic(self):
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("doc.txt", b"%PDF-1.3\n%%EOF"))
+        self.assertEqual(ctx.exception.code, "pdf_only")
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("doc.pdf", b"<html>hello</html>"))
+        self.assertEqual(ctx.exception.code, "pdf_only")
+
+    def test_rejects_encrypted_pdf(self):
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("secret.pdf", self._blank_pdf(encrypt="pw")))
+        self.assertEqual(ctx.exception.code, "pdf_encrypted")
+
+    def test_rejects_active_content(self):
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("bad.pdf", self._blank_pdf(open_action=True)))
+        self.assertEqual(ctx.exception.code, "pdf_active_content")
+
+    def test_blank_pdf_has_no_text(self):
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        with self.assertRaises(PdfValidationError) as ctx:
+            validate_pdf_upload(self._upload("blank.pdf", self._blank_pdf()))
+        self.assertEqual(ctx.exception.code, "pdf_no_text")
+
+    def test_rejects_oversized_upload(self):
+        from django.test import override_settings
+
+        from ai.services.pdf_upload import PdfValidationError, validate_pdf_upload
+
+        data = self._blank_pdf()
+        with override_settings(AI_PDF_MAX_SIZE_MB=0):
+            with self.assertRaises(PdfValidationError) as ctx:
+                validate_pdf_upload(self._upload("big.pdf", data))
+        self.assertEqual(ctx.exception.code, "pdf_too_large")
+
+    def test_sanitizes_filename_and_text(self):
+        from ai.services.pdf_upload import sanitize_filename, sanitize_text
+
+        self.assertEqual(sanitize_filename("../../etc/pass\x00wd.pdf"), "passwd.pdf")
+        self.assertEqual(sanitize_text("A\x00B\r\n\r\n\r\nC  \nD"), "AB\n\nC\nD")
+
+    def test_build_pdf_block_is_localized_and_capped(self):
+        from ai.services.pdf_upload import build_pdf_block, sanitize_text
+
+        pdf = {"name": "lecture.pdf", "pages": 3, "text": "Hello\x00 world", "truncated": False}
+        self.assertIn("Содержимое PDF-файла", build_pdf_block(pdf, "Russian"))
+        self.assertIn("PDF file content", build_pdf_block(pdf, "English"))
+        self.assertIn("Contenu du fichier PDF", build_pdf_block(pdf, "French"))
+        self.assertEqual(
+            build_pdf_block({"name": "x.pdf", "text": "  \x00  "}, "Russian"), "",
+        )
+        self.assertEqual(sanitize_text("ok"), "ok")
+
+    def test_pdf_supports_vision_uses_registry(self):
+        from ai.services.pdf_upload import pdf_supports_vision
+
+        self.assertTrue(pdf_supports_vision("Ollama_Gemma_4_Cloud"))
+        self.assertFalse(pdf_supports_vision("Ollama_DeepSeek_V4_Pro_Cloud"))
+        self.assertFalse(pdf_supports_vision("does_not_exist"))
+        self.assertFalse(pdf_supports_vision(""))
+        # Личная модель без пользователя не резолвится.
+        self.assertFalse(pdf_supports_vision("User_1"))
+
+
+class PdfComposerTests(SimpleTestCase):
+    """PDF-блок добавляется к сообщению чата, но не подменяет его."""
+
+    class _Resolver:
+        async def resolve_text(self, *args, **kwargs):
+            return "SYSTEM"
+
+    def _build(self, data):
+        import asyncio
+
+        from ai.services.message_composer import ChatModeBuilder
+
+        return asyncio.run(ChatModeBuilder().build(data, self._Resolver()))
+
+    def test_pdf_block_appended_after_user_message(self):
+        message = self._build({
+            "message": "Что здесь написано?",
+            "language": "Russian",
+            "pdf": {"name": "doc.pdf", "pages": 2, "text": "PDF TEXT", "truncated": False},
+        })
+        self.assertTrue(message.startswith("Что здесь написано?"))
+        self.assertIn("[Содержимое PDF-файла: doc.pdf (2 стр.)]", message)
+        self.assertIn("PDF TEXT", message)
+
+    def test_pdf_block_survives_preprompt(self):
+        message = self._build({
+            "message": "Hi",
+            "language": "English",
+            "preprompt": "42",
+            "pdf": {"name": "doc.pdf", "pages": 1, "text": "PDF TEXT"},
+        })
+        self.assertIn("PDF file content", message)
+        self.assertIn("Preprompt: SYSTEM", message)
+        self.assertLess(message.index("PDF TEXT"), message.index("Preprompt: SYSTEM"))
+
+    def test_empty_pdf_is_ignored(self):
+        message = self._build({"message": "Hi", "language": "English", "pdf": {"text": ""}})
+        self.assertEqual(message, "Hi")
+
+
+class TopPanelIncludeTests(SimpleTestCase):
+    """Шапка — единый partial; активный пункт режима берётся из active_page."""
+
+    @staticmethod
+    def _render(active_page, **extra):
+        from django.template.loader import render_to_string
+
+        context = {
+            "active_page": active_page,
+            "saved_lang": "Russian",
+            "t": {},
+            "available_models": [],
+            "user_models_options": [],
+            "shared_user_models": [],
+            "public_user_models": [],
+            "last_update_date": None,
+        }
+        context.update(extra)
+        return render_to_string("ai/_top_panel.html", context)
+
+    def test_active_page_marks_only_its_mode(self):
+        self.assertIn('/ai/chat/" selected', self._render("chat"))
+        self.assertNotIn('/ai/solve-problem/" selected', self._render("chat"))
+        self.assertIn('/ai/solve-problem/" selected', self._render("solve"))
+        self.assertIn('/ai/find-error/" selected', self._render("find_error"))
+        panel = self._render("my_models")
+        self.assertNotIn('/ai/chat/" selected', panel)
+        self.assertNotIn('/ai/solve-problem/" selected', panel)
+        self.assertNotIn('/ai/find-error/" selected', panel)
+
+    def test_model_option_carries_vision_flag_for_client_gate(self):
+        from ai.model_clients import registry
+
+        model = {
+            "key": "Ollama_Gemma_4_Cloud",
+            "title": "Ollama Gemma 4",
+            "capabilities": registry.capabilities("Ollama_Gemma_4_Cloud"),
+        }
+        panel = self._render(
+            "chat",
+            available_models=[model],
+            other_models=[model],
+            default_model_key=model["key"],
+        )
+        self.assertIn('id="selectLang"', panel)
+        self.assertIn('id="selectType"', panel)
+        self.assertIn('data-vision="1"', panel)
+
+    def test_user_model_option_uses_supports_vision(self):
+        panel = self._render(
+            "chat",
+            user_models_options=[{"key": "User_1", "title": "Mine", "supports_vision": True}],
+        )
+        self.assertIn('data-vision="1"', panel)
 
 
 class ArmReportTests(SimpleTestCase):
@@ -5037,11 +5256,13 @@ class BatchParallelWorkerTests(TransactionTestCase):
         pair_threads = {}
         orig_pair = arm_runner._process_batch_pair
 
-        def spy_pair(ctx, task_ctx, model, dl_lock):
+        def spy_pair(ctx, task_ctx, model, dl_lock, context_block=""):
             pair_threads.setdefault(
                 model["key"], set()
             ).add((threading.get_ident(), task_ctx["node_id"]))
-            return orig_pair(ctx, task_ctx, model, dl_lock)
+            return orig_pair(
+                ctx, task_ctx, model, dl_lock, context_block=context_block,
+            )
 
         try:
             # Процессор пары выбирается из реестра _PAIR_PROCESSORS (полиморфизм
@@ -6785,18 +7006,27 @@ class OllamaRegistryTests(SimpleTestCase):
         "Ollama_Gpt_Oss_20B_Cloud",
         "Ollama_Gpt_Oss_120B_Cloud",
         "Ollama_MiniMax_M3_1_Flash_Cloud",
+        "Ollama_Beam_Cloud",
     ]
 
-    # gpt-oss:cloud (harmony) и minimax-m3.1-flash:cloud стримят отдельное поле
-    # thinking → reasoning-модели.
-    REASONING_KEYS = {
-        "Ollama_Gpt_Oss_20B_Cloud",
-        "Ollama_Gpt_Oss_120B_Cloud",
+    # Ollama-модели с vision по их страницам в библиотеке Ollama. Все
+    # остальные — thinking без vision; gpt-oss/minimax тоже стримят отдельное
+    # поле thinking.
+    VISION_KEYS = {
+        "Ollama_Glm_5_3_Flash_Cloud",
+        "Ollama_DeepSeek_V4_1_Flash_Cloud",
+        "Ollama_Gemma_4_Cloud",
+        "Ollama_Kimi_K2_7_Code_Cloud",
+        "Ollama_Kimi_K2_6_Cloud",
         "Ollama_MiniMax_M3_1_Flash_Cloud",
     }
 
     def _expected_caps(self, key):
-        return {"text": True, "vision": False, "reasoning": key in self.REASONING_KEYS}
+        return {
+            "text": True,
+            "vision": key in self.VISION_KEYS,
+            "reasoning": True,
+        }
 
     def test_registry_contains_ollama_models(self):
         from ai.model_clients import registry, ollama
@@ -10699,10 +10929,9 @@ class BatchLogDetailTemplateTests(TestCase):
 class ArmSolveTopicsKeyTests(TestCase):
     """Темы в контексте /arm/solve/ обязаны нести ключ сериализатора
     serialize_topic (``programming_language``): JS arm_solve.html фильтрует
-    темы по ``langIds.has(String(t.programming_language))`` (объединение тем
-    ВСЕХ выбранных языков) — чтение другого ключа оставляет селектор тем
-    пустым и ломает привязки «Промпты по умолчанию» (регрессия из
-    удалённой страницы arm_find_error.html)."""
+    темы по ``String(t.programming_language)`` (единственный выбранный язык) —
+    чтение другого ключа оставляет селектор тем пустым и ломает привязки
+    «Промпты по умолчанию» (регрессия из удалённой страницы arm_find_error.html)."""
 
     def setUp(self):
         self.factory = RequestFactory()
@@ -10733,10 +10962,9 @@ class ArmSolveTopicsKeyTests(TestCase):
             Path(__file__).resolve().parent.parent / "static" / "admin" / "ai"
             / "arm_solve" / "index.js"
         ).read_text(encoding="utf-8")
-        # Темы фильтруются по ключу сериализатора через Set (объединение
-        # тем всех выбранных языков).
+        # Темы фильтруются по ключу сериализатора (единственный язык страницы).
         self.assertIn(
-            "langIds.has(String(t.programming_language))", src,
+            "String(t.programming_language) === String(lang.id)", src,
         )
         self.assertNotIn("t.programming_language_id", src)
 
@@ -10768,12 +10996,12 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
     def test_prompt_debug_form_state_is_remembered(self):
         """Форма «Отладки промтов» запоминается между визитами: страница
         зарегистрирована в общем механизме ai_admin_state.js (свой pathname —
-        без записи форма сбрасывалась), а у чекбоксов языков есть id — без
-        name/id у них нет ключа сохранения, и выбор языка терялся."""
+        без записи форма сбрасывалась), а у селектора языка есть id — без
+        name/id у него нет ключа сохранения, и выбор языка терялся."""
         src = self._static_source("admin", "js", "ai_admin_state.js")
         self.assertIn('"/ai/admin/arm/prompt-debug/": "#armSolveForm"', src)
         tpl = self._source("admin/ai/arm_solve.html")
-        self.assertIn('id="armLangCheck{{ lang.id }}"', tpl)
+        self.assertIn('id="armLanguageSelect"', tpl)
         self.assertIn('name="prompt_attempts"', tpl)
 
     def test_rerun_pairs_post_sends_csrf_token(self):
@@ -10786,6 +11014,41 @@ class ArmSolveTemplateMarkersTests(SimpleTestCase):
         src = self._static_source("admin", "ai", "arm_solve", "index.js")
         self.assertIn("function parseJsonResponse", src)
         self.assertIn("Сессия истекла", src)
+        # Не-JSON НЕ 403 — показываем статус и начало тела: 504 от прокси
+        # раньше маскировался под «сессию истекла» (внешний nginx на dl.gsu.by
+        # держит дефолтный proxy_read_timeout 60 с).
+        self.assertIn("HTTP ' + response.status", src)
+
+    def test_read_json_script_ids_exist_in_template(self):
+        """Каждый `readJsonScript('id')` обязан иметь `json_script:"id"` в шаблоне.
+
+        Рассинхрон id даёт пустую строку вместо URL, `fetch('')` уходит POST-ом
+        на саму страницу, она отдаёт HTML 200 — кнопка «Обновить статусы из DL»
+        показывала «Сессия истекла» при живой сессии (id расходился на слово
+        «task»).
+        """
+        import re as _re
+
+        src = self._static_source("admin", "ai", "arm_solve", "index.js")
+        tpl = self._source("admin/ai/arm_solve.html")
+        ids = set(_re.findall(r"readJsonScript\('([^']+)'", src))
+        self.assertTrue(ids)
+        for script_id in ids:
+            self.assertIn(
+                'json_script:"%s"' % script_id, tpl,
+                "в шаблоне нет json_script с id %r, который читает index.js" % script_id,
+            )
+
+    def test_task_status_refresh_chunk_fits_proxy_timeout(self):
+        """Пачка refresh-запроса обязана укладываться в 60 с внешнего nginx.
+
+        Пачка 50 узлов при 5 потоках и таймауте узла 10 с могла длиться до
+        150 с → HTML 504 → «сессия истекла». Держим пачку ≤ 10.
+        """
+        src = self._static_source("admin", "ai", "arm_solve", "index.js")
+        self.assertIn("const TASK_REFRESH_CHUNK = 10;", src)
+        from ai.services.task_language_status import REFRESH_TIMEOUT
+        self.assertLessEqual(REFRESH_TIMEOUT, 10)
 
     def test_batch_results_body_fetch_has_expired_session_parser(self):
         """Ленивое тело результата (partial используется на /arm/solve/ и в
@@ -11279,14 +11542,14 @@ class DocsServiceTests(SimpleTestCase):
         from ai.services.docs import visible_chapter_slugs
         self.assertEqual(
             visible_chapter_slugs(is_superuser=False, is_staff=False, is_authenticated=True),
-            ["user", "prompt-developer"],
+            ["user", "prompt-developer", "find-error-prompt"],
         )
         staff_slugs = visible_chapter_slugs(is_superuser=False, is_staff=True, is_authenticated=True)
         self.assertIn("developer", staff_slugs)
         self.assertNotIn("superuser", staff_slugs)
         self.assertEqual(
             visible_chapter_slugs(is_superuser=True, is_staff=True, is_authenticated=True),
-            ["user", "prompt-developer", "developer", "superuser"],
+            ["user", "prompt-developer", "find-error-prompt", "developer", "superuser"],
         )
         self.assertEqual(
             visible_chapter_slugs(is_superuser=False, is_staff=False, is_authenticated=False),
@@ -11633,6 +11896,67 @@ class ViewAsViewTests(_AdminViewRequestMixin, TestCase):
                          "реальные группы не тронуты")
 
 
+class AdminFreshAuthRedirectTests(_AdminViewRequestMixin, TestCase):
+    """admin_view не зацикливает login ↔ страницы админки.
+
+    Регресс: маркер ``admin_fresh_auth`` ставился только «Разработчику
+    промптов»/staff. Член группы «Разработчик» (``page.admin`` без PD-роли)
+    и суперюзер в режиме «Посмотреть как…» попадали в петлю
+    ``/ai/admin/`` → ``/ai/admin/login/?next=…`` → ``/ai/admin/``
+    (next рос каждый переход, браузер — «циклическое перенаправление»).
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user_model = get_user_model()
+
+    def _wrapped(self):
+        from django.http import HttpResponse
+        from ai.admin.site import ai_admin_site
+        return ai_admin_site.admin_view(lambda request: HttpResponse("ok"))
+
+    def _request_without_marker(self, user, path="/ai/admin/"):
+        request = self._admin_request(user, path=path)
+        request.session.pop("admin_fresh_auth", None)
+        return request
+
+    def test_page_admin_only_user_gets_marker_and_no_loop(self):
+        from unittest.mock import patch
+        user = self.user_model.objects.create_user(username="loop-dev", password="x")
+        group = self._view_as_group("Петля-разработчик", ["page.admin"])
+        group.users.add(user)
+        request = self._request_without_marker(user)
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = self._wrapped()(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(request.session.get("admin_fresh_auth"))
+
+    def test_superuser_in_view_as_does_not_loop(self):
+        from unittest.mock import patch
+        superuser = self.user_model.objects.create_user(
+            username="loop-super", password="x", is_superuser=True, is_staff=True,
+        )
+        group = self._view_as_group("Петля-эмуляция", ["page.admin"])
+        request = self._request_without_marker(superuser)
+        self._enter_view_as(request, group)
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = self._wrapped()(request)
+        # В эмуляции super-обход выключен, но page.admin у группы есть —
+        # маркер ставится и рендера страницы не миновать.
+        self.assertEqual(response.status_code, 200)
+
+    def test_login_page_never_redirects_to_itself(self):
+        from unittest.mock import patch
+        # Пользователь без прав вовсе: маркер не поставить, но и петли быть
+        # не должно — login-вью сама покажет «Нет доступа».
+        user = self.user_model.objects.create_user(username="loop-none", password="x")
+        request = self._request_without_marker(user, path="/ai/admin/login/")
+        with patch("ai.admin.site.get_external_user_id_from_request", return_value="12345"):
+            response = self._wrapped()(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("login/?next", response.headers.get("Location", ""))
+
+
 class ViewAsContextTests(_AdminViewRequestMixin, TestCase):
     """each_context в честной эмуляции «Посмотреть как…»: доступ РОВНО
     по ключам эмулируемой группы (+baseline при page.admin), супер-обход
@@ -11672,7 +11996,7 @@ class ViewAsContextTests(_AdminViewRequestMixin, TestCase):
         self.assertTrue(context["show_test_console_link"])
         self.assertEqual(
             self._doc_tool_names(context),
-            ["Разработчик промптов", "Разработчик", "Суперюзер"],
+            ["Разработчик промптов", "Препромпт «В чём ошибка»", "Разработчик", "Суперюзер"],
         )
 
     def test_view_as_group_shows_only_group_pages(self):
@@ -11806,9 +12130,11 @@ class ChatUserDocsViewTests(TestCase):
         self.factory = RequestFactory()
         self.user_model = get_user_model()
 
-    def _request(self, path):
+    def _request(self, path, *, user=None):
         request = self.factory.get(path)
-        request.user = self.user_model.objects.create_user(username="chat-docs", password="x")
+        request.user = user or self.user_model.objects.create_user(
+            username="chat-docs", password="x"
+        )
         return request
 
     def test_forbidden_without_external_id(self):
@@ -11826,8 +12152,54 @@ class ChatUserDocsViewTests(TestCase):
         self.assertTrue(data["success"])
         self.assertIn("<h", data["html"])
         self.assertEqual(data["lang"], "ru")
+        self.assertEqual(data["chapter"], "user")
         self.assertEqual(len(data["fingerprint"]), 2)
-        self.assertEqual(data["download_url"], "/ai/docs/download/?lang=ru")
+        self.assertEqual(data["download_url"], "/ai/docs/download/?chapter=user&lang=ru")
+        # Обычному пользователю доступна только инструкция пользователя.
+        self.assertEqual([c["slug"] for c in data["chapters"]], ["user"])
+        self.assertEqual(data["chapters"][0]["title"], "Инструкция для пользователя")
+
+    def test_find_error_chapter_requires_prompt_docs_access(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_view
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            response = chat_user_docs_view(
+                self._request("/ai/docs/?chapter=find-error-prompt")
+            )
+        self.assertEqual(response.status_code, 403)
+
+    def test_unknown_chapter_forbidden(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_view
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            response = chat_user_docs_view(
+                self._request("/ai/docs/?chapter=developer")
+            )
+        self.assertEqual(response.status_code, 403)
+
+    def test_prompt_developer_sees_find_error_chapter(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_view
+        staff = self.user_model.objects.create_user(
+            username="chat-docs-staff", password="x", is_staff=True
+        )
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            response = chat_user_docs_view(
+                self._request("/ai/docs/?chapter=find-error-prompt", user=staff)
+            )
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)
+        self.assertEqual(data["chapter"], "find-error-prompt")
+        self.assertIn("<h", data["html"])
+        # Технические главы не переводятся: даже при ?lang=English — ru.
+        self.assertEqual(data["lang"], "ru")
+        self.assertEqual(
+            [c["slug"] for c in data["chapters"]], ["user", "find-error-prompt"]
+        )
+        self.assertEqual(
+            data["download_url"],
+            "/ai/docs/download/?chapter=find-error-prompt&lang=ru",
+        )
 
     def test_download_headers(self):
         from unittest.mock import patch
@@ -11836,6 +12208,27 @@ class ChatUserDocsViewTests(TestCase):
             response = chat_user_docs_download_view(self._request("/ai/docs/download/"))
         self.assertEqual(response["Content-Type"], "text/markdown; charset=utf-8")
         self.assertIn("attachment", response["Content-Disposition"])
+
+    def test_download_find_error_chapter_gated(self):
+        from unittest.mock import patch
+        from ai.views import chat_user_docs_download_view
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            forbidden = chat_user_docs_download_view(
+                self._request("/ai/docs/download/?chapter=find-error-prompt")
+            )
+        self.assertEqual(forbidden.status_code, 403)
+
+        staff = self.user_model.objects.create_user(
+            username="chat-docs-staff-dl", password="x", is_staff=True
+        )
+        with patch("ai.views.get_external_user_id_from_request", return_value="12345"):
+            allowed = chat_user_docs_download_view(
+                self._request(
+                    "/ai/docs/download/?chapter=find-error-prompt", user=staff
+                )
+            )
+        self.assertEqual(allowed.status_code, 200)
+        self.assertIn("Разработчику препромпта", allowed.content.decode("utf-8"))
 
     def test_download_forbidden_without_external_id(self):
         from ai.views import chat_user_docs_download_view
@@ -14237,7 +14630,8 @@ class ChatUserDocsLangTests(TestCase):
         data = json.loads(response.content)
         self.assertEqual(data["title"], "User Guide")
         self.assertEqual(data["lang"], "en")
-        self.assertEqual(data["download_url"], "/ai/docs/download/?lang=en")
+        self.assertEqual(data["download_url"],
+                         "/ai/docs/download/?chapter=user&lang=en")
         self.assertIn("[en]Привет", data["html"])
 
     def test_french_download_filename(self):
@@ -15151,6 +15545,7 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
 
     def setUp(self):
         from ai.admin.tasks import (
+            admin_task_assign_view,
             admin_task_claim_view,
             admin_task_close_view,
             admin_task_create_view,
@@ -15164,6 +15559,7 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.create_view = admin_task_create_view
         self.reorder_view = admin_task_reorder_view
         self.claim_view = admin_task_claim_view
+        self.assign_view = admin_task_assign_view
         self.close_view = admin_task_close_view
         self.reopen_view = admin_task_reopen_view
         self.edit_view = admin_task_edit_view
@@ -15215,13 +15611,31 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.context_data["can_create"])
         self.assertFalse(resp.context_data["can_close"])
+        self.assertFalse(resp.context_data["can_assign"])
+        # Статического списка разработчиков больше нет: исполнителя ищет
+        # AJAX-автокомплит по ВСЕМ пользователям.
+        self.assertNotIn("developer_options", resp.context_data)
+        self.assertEqual(
+            resp.context_data["assign_search_url"],
+            f"{self.tasks_url}users/search/",
+        )
         self.assertTrue(resp.context_data["can_reorder"])
 
+        AIDevTask.objects.create(title="Т-кнопка", created_by=self.superuser)
         resp = self.page_view(self._request(self.superuser, path=self.tasks_url))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.context_data["can_create"])
         self.assertTrue(resp.context_data["can_close"])
+        self.assertTrue(resp.context_data["can_assign"])
+        self.assertEqual(
+            resp.context_data["assign_search_url"],
+            f"{self.tasks_url}users/search/",
+        )
         self.assertTrue(resp.context_data["can_reorder"])
+        resp.render()
+        html = resp.content.decode()
+        self.assertIn("data-assign-open", html)
+        self.assertIn("data-assign-search-url", html)
 
     def test_rows_are_draggable_on_front_and_wish_tabs(self):
         """Перетаскивание: HTML5 DnD требует draggable на строках (регрессия
@@ -15381,35 +15795,240 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         resp = self.claim_view(self._request(self.dev, "post", f"/x/{task.id}/claim/"), task.id)
         self.assertEqual(resp.status_code, 409)
 
-    # --- Закрытие (superuser) ----------------------------------------------
+    # --- Поручение (superuser → «Разработчик») ----------------------------
 
-    def test_close_requires_superuser(self):
+    def test_assign_requires_superuser(self):
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        resp = self.assign_view(
+            self._request(self.dev, "post", f"/x/{task.id}/assign/", body={"user_id": self.other_dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 403)
+        task.refresh_from_db()
+        self.assertIsNone(task.taken_by)
+
+    def test_assign_sets_assignee_and_allows_reassignment(self):
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.dev)
+        self.assertIsNotNone(task.taken_at)
+
+        # Перепоручение — суперюзер может назначить другого разработчика.
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.other_dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.taken_by, self.other_dev)
+
+    def test_assign_any_active_user_gets_auto_developer_role(self):
+        """Поручать можно ЛЮБОМУ активному: не-разработчик автоматически
+        зачисляется в группу «Разработчик» и получает маркер авто-роли."""
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        for user in (self.pd, self.outsider):
+            resp = self.assign_view(
+                self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": user.pk}),
+                task.id,
+            )
+            self.assertEqual(resp.status_code, 200, user.username)
+            payload = json.loads(resp.content)
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["added_to_group"], user.username)
+            task.refresh_from_db()
+            self.assertEqual(task.taken_by, user)
+            self.assertTrue(
+                user.ai_access_groups.filter(name="Разработчик").exists(),
+                user.username,
+            )
+            self.assertTrue(
+                AIDevTaskDeveloperGrant.objects.filter(user=user).exists(),
+                user.username,
+            )
+
+        # Уже член группы «Разработчик»: назначается, но маркер НЕ ставится —
+        # такое членство может быть ручным, автоматика его не снимает.
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(json.loads(resp.content)["added_to_group"])
+        self.assertFalse(
+            AIDevTaskDeveloperGrant.objects.filter(user=self.dev).exists()
+        )
+
+    def test_assign_rejects_inactive_user(self):
+        self.pd.is_active = False
+        self.pd.save(update_fields=["is_active"])
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.pd.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 404)
+        task.refresh_from_db()
+        self.assertIsNone(task.taken_by)
+
+    def test_close_last_task_revokes_auto_developer_role(self):
+        """Закрытие последнего активного таска снимает авто-роль и маркер;
+        пока есть другой активный таск — роль остаётся; «Вернуть» выдаёт её
+        снова."""
+        auto = get_user_model().objects.create_user(username="task_auto", password="x")
+        first = AIDevTask.objects.create(title="Т-авто-1", created_by=self.superuser)
+        second = AIDevTask.objects.create(title="Т-авто-2", created_by=self.superuser)
+        for task in (first, second):
+            self.assign_view(
+                self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": auto.pk}),
+                task.id,
+            )
+        self.assertTrue(auto.ai_access_groups.filter(name="Разработчик").exists())
+
+        # Закрыт один из двух — роль нужна (есть ещё активный таск).
+        self.assertEqual(
+            self.close_view(self._request(self.superuser, "post", f"/x/{first.id}/close/"), first.id).status_code,
+            200,
+        )
+        self.assertTrue(auto.ai_access_groups.filter(name="Разработчик").exists())
+        self.assertTrue(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+        # Закрыт последний — авто-роль и маркер сняты.
+        self.assertEqual(
+            self.close_view(self._request(self.superuser, "post", f"/x/{second.id}/close/"), second.id).status_code,
+            200,
+        )
+        self.assertFalse(auto.ai_access_groups.filter(name="Разработчик").exists())
+        self.assertFalse(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+        # «Вернуть» — таск снова активен у того же исполнителя, роль выдана.
+        self.assertEqual(
+            self.reopen_view(self._request(self.superuser, "post", f"/x/{second.id}/reopen/"), second.id).status_code,
+            200,
+        )
+        self.assertTrue(auto.ai_access_groups.filter(name="Разработчик").exists())
+        self.assertTrue(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+    def test_manual_group_membership_is_not_revoked(self):
+        """Членство, добавленное вручную на «Группах доступа», рвёт маркер
+        авто-роли — закрытие тасков его больше не снимает."""
+        from ai.admin.access_groups import admin_access_group_member_toggle_view
+
+        auto = get_user_model().objects.create_user(username="task_manual", password="x")
+        task = AIDevTask.objects.create(title="Т-ручной", created_by=self.superuser)
+        self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": auto.pk}),
+            task.id,
+        )
+        group = AIAccessGroup.objects.get(name="Разработчик")
+        self.assertTrue(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+        # Суперюзер «переподтверждает» членство вручную на «Группах доступа»:
+        # toggle add снимает маркер.
+        resp = admin_access_group_member_toggle_view(
+            self._request(self.superuser, "post", path=f"/x/{group.pk}/members/toggle/",
+                          data={"user_id": auto.pk, "action": "add"}),
+            group.pk,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(AIDevTaskDeveloperGrant.objects.filter(user=auto).exists())
+
+        # Закрытие последнего таска роль НЕ снимает.
+        self.assertEqual(
+            self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id).status_code,
+            200,
+        )
+        self.assertTrue(auto.ai_access_groups.filter(name="Разработчик").exists())
+
+    def test_assign_validates_task_and_payload(self):
+        task = AIDevTask.objects.create(title="Т-поручение", created_by=self.superuser)
+        # Нет user_id / не число — 400.
+        for body in ({}, {"user_id": "5"}, {"user_id": True}):
+            resp = self.assign_view(
+                self._request(self.superuser, "post", f"/x/{task.id}/assign/", body=body),
+                task.id,
+            )
+            self.assertEqual(resp.status_code, 400, body)
+        # Неизвестный таск — 404.
+        resp = self.assign_view(
+            self._request(self.superuser, "post", "/x/99999/assign/", body={"user_id": self.dev.pk}),
+            99999,
+        )
+        self.assertEqual(resp.status_code, 404)
+        # Закрытый таск — 409 (сначала «Вернуть»).
+        AIDevTask.objects.filter(pk=task.pk).update(closed_at=timezone.now())
+        resp = self.assign_view(
+            self._request(self.superuser, "post", f"/x/{task.id}/assign/", body={"user_id": self.dev.pk}),
+            task.id,
+        )
+        self.assertEqual(resp.status_code, 409)
+
+    # --- Закрытие ---------------------------------------------------------
+
+    def test_close_superuser_or_assignee(self):
         """Закрытие уводит таск с доски, но НЕ удаляет строку: closed_at/
         closed_by ставятся, приоритетный номер сбрасывается, taken-поля
-        остаются (в архиве видно «кто выполнил»); второй close — 409."""
+        остаются (в архиве видно «кто выполнил»); второй close — 409.
+        Назначенный исполнитель закрывает СВОЙ таск; чужой — 403."""
         task = AIDevTask.objects.create(
             title="Т3", created_by=self.superuser, taken_by=self.dev,
             priority_no=5,
         )
-        resp = self.close_view(self._request(self.dev, "post", f"/x/{task.id}/close/"), task.id)
+        # Не назначенный на этот таск разработчик — 403.
+        resp = self.close_view(self._request(self.other_dev, "post", f"/x/{task.id}/close/"), task.id)
         self.assertEqual(resp.status_code, 403)
         task.refresh_from_db()
         self.assertIsNone(task.closed_at)
 
+        # Назначенный исполнитель закрывает свой таск сам.
         self.assertEqual(
-            self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id).status_code,
+            self.close_view(self._request(self.dev, "post", f"/x/{task.id}/close/"), task.id).status_code,
             200,
         )
         task.refresh_from_db()
         # Строка жива: архив, а не удаление.
         self.assertIsNotNone(task.closed_at)
-        self.assertEqual(task.closed_by, self.superuser)
+        self.assertEqual(task.closed_by, self.dev)
         self.assertIsNone(task.priority_no)
         self.assertEqual(task.taken_by, self.dev)
 
         # Повторное закрытие закрытого — 409.
         resp = self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
         self.assertEqual(resp.status_code, 409)
+
+    def test_close_superuser_closes_any_task(self):
+        task = AIDevTask.objects.create(
+            title="Т4", created_by=self.superuser, taken_by=self.other_dev,
+        )
+        resp = self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.closed_by, self.superuser)
+        # ФИО разработчика в архиве — из taken_by, а не из закрывшего.
+        self.assertEqual(task.taken_by, self.other_dev)
+
+        # Незанятый таск суперюзер тоже может закрыть.
+        free = AIDevTask.objects.create(title="Т5", created_by=self.superuser)
+        resp = self.close_view(self._request(self.superuser, "post", f"/x/{free.id}/close/"), free.id)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_closed_archive_shows_assignee_for_superuser_close(self):
+        """После закрытия суперюзером в архивной строке — ФИО разработчика
+        (taken_by), даже если closed_by — суперюзер."""
+        task = AIDevTask.objects.create(
+            title="Т-архив", created_by=self.superuser, taken_by=self.dev,
+        )
+        self.close_view(self._request(self.superuser, "post", f"/x/{task.id}/close/"), task.id)
+        resp = self.page_view(
+            self._request(self.superuser, path=f"{self.tasks_url}?kind=closed")
+        )
+        row = next(r for r in resp.context_data["rows"] if r["id"] == task.pk)
+        self.assertTrue(row["claimant"])
+        self.assertIn("task_dev", row["claimant"])
 
     def test_close_unknown_task_is_404(self):
         resp = self.close_view(self._request(self.superuser, "post", "/x/99999/close/"), 99999)
@@ -16191,6 +16810,93 @@ class AIDevTaskBoardTests(_AdminViewRequestMixin, TestCase):
         self.assertTrue(AIDevTask.objects.filter(title="Т6-view-as").exists())
 
 
+class AIDevTaskUserSearchTests(TestCase):
+    """AJAX-поиск исполнителя для «Поручено» (/ai/admin/tasks/users/search/).
+
+    Ищет по ВСЕМ активным пользователям (не только по группе «Разработчик»)
+    универсальными правилами ai/services/user_search.py: ФИО в любом порядке,
+    точный id и форма id_<id>. Доступ — только суперюзер.
+    """
+
+    def setUp(self):
+        from ai.admin.tasks import admin_task_user_search_view
+
+        self.view = admin_task_user_search_view
+        self.superuser = get_user_model().objects.create_superuser(
+            username="search_admin", password="x", email="s@a.com",
+        )
+        self.ivanov = get_user_model().objects.create_user(
+            username="user_501", password="x",
+            first_name="Иван", last_name="Иванов",
+        )
+        self.petrova = get_user_model().objects.create_user(
+            username="user_502", password="x",
+            first_name="Анна", last_name="Петрова",
+        )
+        make_developer(self.petrova)
+
+    def _get(self, user, query):
+        request = RequestFactory().get(
+            "/ai/admin/tasks/users/search/", {"q": query}
+        )
+        request.user = user
+        return self.view(request)
+
+    def _names(self, user, query):
+        resp = self._get(user, query)
+        self.assertEqual(resp.status_code, 200)
+        payload = json.loads(resp.content)
+        self.assertTrue(payload["ok"])
+        return {row["name"] for row in payload["users"]}
+
+    def test_search_requires_superuser(self):
+        resp = self._get(self.ivanov, "Иванов")
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(json.loads(resp.content)["ok"])
+
+    def test_search_by_full_name_in_any_order(self):
+        for query in ("Иванов Иван", "Иван Иванов", "Ив Ив"):
+            self.assertIn("Иван Иванов", self._names(self.superuser, query), query)
+
+    def test_search_by_id_and_id_prefix(self):
+        for query in (
+            str(self.ivanov.pk),
+            f"id_{self.ivanov.pk}",
+            f"ID_{self.ivanov.pk}",
+            "501",  # логин user_501
+        ):
+            names = self._names(self.superuser, query)
+            self.assertIn("Иван Иванов", names, query)
+            self.assertNotIn("Анна Петрова", names, query)
+
+    def test_search_reports_group_membership(self):
+        resp = self._get(self.superuser, "Петрова")
+        payload = json.loads(resp.content)
+        row = next(r for r in payload["users"] if r["name"] == "Анна Петрова")
+        self.assertTrue(row["is_developer"])
+        self.assertEqual(row["dl_id"], "502")
+
+        resp = self._get(self.superuser, "Иванов")
+        row = next(
+            r for r in json.loads(resp.content)["users"]
+            if r["name"] == "Иван Иванов"
+        )
+        self.assertFalse(row["is_developer"])
+
+    def test_search_empty_query_is_empty_list(self):
+        self.assertEqual(self._names(self.superuser, ""), set())
+        self.assertEqual(self._names(self.superuser, "id_999999999"), set())
+
+    def test_search_respects_limit(self):
+        for index in range(25):
+            get_user_model().objects.create_user(
+                username=f"many_{index}", password="x",
+                first_name=f"Иван{index}", last_name="Многочисленный",
+            )
+        resp = self._get(self.superuser, "Многочисленный")
+        self.assertLessEqual(len(json.loads(resp.content)["users"]), 20)
+
+
 class TasksPageStateTests(SimpleTestCase):
     """Сохранение состояния страницы доски «Таски» (прокрутка, черновик
     формы, фильтры) — общий хелпер static/admin/js/ai_page_state.js.
@@ -16549,7 +17255,9 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
             # всей базовой аудитории админки (как «Мой промпт»).
             {"page.admin", "page.arm_solve", "page.prompt_admin",
              "page.prompt_defaults", "page.logs_own",
-             "page.model_status", "page.tasks", "page.user_models"},
+             "page.model_status", "page.tasks", "page.user_models",
+             # 0081: «Лаборатория промптов» (и база ошибочных программ).
+             "page.prompt_lab"},
         )
         self.assertEqual(
             {p.key for p in dev.permissions.all()},
@@ -16559,7 +17267,7 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
              "page.prompt_admin", "page.test_console",
              "page.tasks", "page.logs_own", "page.updates",
              "page.user_models", "page.tokens", "page.dl_api_requests",
-             "docs.developer", "action.task_reorder"},
+             "page.prompt_lab", "docs.developer", "action.task_reorder"},
         )
         # Базовые права (BASELINE_ACCESS_KEYS): seeds групп могли и не менять
         # — baseline выдаётся В КОДЕ любому с page.admin, а не сидами.
@@ -17314,9 +18022,11 @@ class OnboardingServiceTests(TestCase):
             "admin_my_prompt", "admin_prompt_defaults", "admin_logs",
             "admin_pinned_runs", "admin_aiappsettings", "admin_updates",
             "admin_test_console", "admin_tasksolution",
-            "admin_test_data",
+            "admin_test_data", "admin_model_status", "admin_tasks",
         ):
             self.assertTrue(scope_name_valid(page_scope))
+        # Клиентская страница «Мои AI-модели» — свой тур по шапке и панели.
+        self.assertTrue(scope_name_valid("my_models"))
         self.assertFalse(scope_name_valid("admin"))
         self.assertFalse(scope_name_valid("nope"))
         self.assertFalse(scope_name_valid(None))
@@ -18438,14 +19148,15 @@ class MpaMultiWindowExtractionTests(SimpleTestCase):
 
 class ModelStatusCapabilityBadgeTests(SimpleTestCase):
     """Три состояния бейджа способности («Состояние моделей»): зелёный —
-    способность есть и модель активна; зелёный зачёркнутый — способность
-    есть, но модель сейчас неактивна; серый зачёркнутый — способности нет."""
+    способность есть у модели И реализована в приложении; зелёный
+    зачёркнутый — есть у модели, но не реализована; серый зачёркнутый —
+    у модели нет. Доступность модели на бейдж не влияет."""
 
     def test_badge_states(self):
         from ai.admin.model_status import _capability_badge
 
         self.assertEqual(_capability_badge(True, True)["class"], "cap-on")
-        self.assertEqual(_capability_badge(True, False)["class"], "cap-on cap-inactive")
+        self.assertEqual(_capability_badge(True, False)["class"], "cap-on cap-unimplemented")
         self.assertEqual(_capability_badge(False, True)["class"], "cap-off")
         self.assertEqual(_capability_badge(False, False)["class"], "cap-off")
         for badge in (
@@ -18461,14 +19172,17 @@ class ModelStatusCapabilityBadgeTests(SimpleTestCase):
         rows = _with_capability_badges([
             {
                 "key": "A",
-                "capabilities": {"text": True, "vision": False, "reasoning": True},
+                "capabilities": {"text": True, "vision": True, "reasoning": True},
                 "is_active": False,
             },
         ])
         caps = rows[0]["cap_classes"]
-        self.assertEqual(caps["text"]["class"], "cap-on cap-inactive")
-        self.assertEqual(caps["vision"]["class"], "cap-off")
-        self.assertEqual(caps["reasoning"]["class"], "cap-on cap-inactive")
+        # Все три способности реализованы в приложении (vision — загрузка PDF
+        # в чат, ai/services/pdf_upload.py), поэтому все бейджи зелёные.
+        # is_active на классы не влияет.
+        self.assertEqual(caps["text"]["class"], "cap-on")
+        self.assertEqual(caps["vision"]["class"], "cap-on")
+        self.assertEqual(caps["reasoning"]["class"], "cap-on")
 
     def test_api_serializer_passes_cap_classes(self):
         from ai.admin.model_status import _serialize_model_status_rows_for_api
@@ -18490,7 +19204,7 @@ class ModelStatusCapabilityBadgeTests(SimpleTestCase):
 
     def test_template_and_css_use_three_states(self):
         """Разметка бейджа — из cap_classes (сервер), CSS — с классом
-        зачёркивания для «есть, но модель неактивна»."""
+        зачёркивания для «есть у модели, но не реализовано»."""
         from django.template.loader import get_template
         from pathlib import Path
 
@@ -18502,8 +19216,49 @@ class ModelStatusCapabilityBadgeTests(SimpleTestCase):
             Path(__file__).resolve().parent.parent
             / "static" / "admin" / "ai" / "model_status" / "index.css"
         ).read_text(encoding="utf-8")
-        self.assertIn(".cap-inactive", css)
+        self.assertIn(".cap-unimplemented", css)
         self.assertIn("text-decoration: line-through", css)
+
+    def test_ollama_capabilities_match_docs(self):
+        """Возможности Ollama-моделей — по их страницам в библиотеке Ollama.
+
+        Vision+thinking: glm-5.3-flash, deepseek-v4.1-flash, gemma4,
+        kimi-k2.7-code, kimi-k2.6, minimax-m3.1-flash. Thinking без vision:
+        glm-5.2, deepseek-v4-pro, nemotron-3-super, gpt-oss 20b/120b, beam
+        (Reflection, «Text in, text out»). Clef сюда не входит — это
+        decision-модель (System One API), а не чат: /api/chat её не обслуживает.
+        """
+        from ai.model_clients.registry import registry, IMPLEMENTED_CAPABILITIES
+
+        vision_and_thinking = {
+            "Ollama_Glm_5_3_Flash_Cloud",
+            "Ollama_DeepSeek_V4_1_Flash_Cloud",
+            "Ollama_Gemma_4_Cloud",
+            "Ollama_Kimi_K2_7_Code_Cloud",
+            "Ollama_Kimi_K2_6_Cloud",
+            "Ollama_MiniMax_M3_1_Flash_Cloud",
+        }
+        thinking_only = {
+            "Ollama_Glm_5_2_Cloud",
+            "Ollama_DeepSeek_V4_Pro_Cloud",
+            "Ollama_Nemotron_3_Super_Cloud",
+            "Ollama_Gpt_Oss_20B_Cloud",
+            "Ollama_Gpt_Oss_120B_Cloud",
+            "Ollama_Beam_Cloud",
+        }
+        for key in vision_and_thinking:
+            caps = registry.capabilities(key)
+            self.assertTrue(caps["vision"], key)
+            self.assertTrue(caps["reasoning"], key)
+        for key in thinking_only:
+            caps = registry.capabilities(key)
+            self.assertFalse(caps["vision"], key)
+            self.assertTrue(caps["reasoning"], key)
+        # Все три способности реализованы в приложении: vision — приём PDF
+        # в чате (ai/services/pdf_upload.py), text — чат, reasoning — think.
+        self.assertTrue(IMPLEMENTED_CAPABILITIES["text"])
+        self.assertTrue(IMPLEMENTED_CAPABILITIES["vision"])
+        self.assertTrue(IMPLEMENTED_CAPABILITIES["reasoning"])
 
 
 class LanguageRequirementsTests(SimpleTestCase):
@@ -20030,7 +20785,10 @@ class ClientStatsGatingTests(SimpleTestCase):
         self.assertGreaterEqual(js.count("updateScopedModelStats();"), 4)
 
     def test_base_chat_keeps_sort_data_attrs(self):
-        tpl = self._read("ai", "templates", "ai", "base_chat.html")
+        # Шапка вынесена в общий partial — проверяем её вместе с базовым
+        # шаблоном (base_chat только подключает _top_panel.html).
+        tpl = self._read("ai", "templates", "ai", "base_chat.html") + self._read(
+            "ai", "templates", "ai", "_top_panel.html")
         self.assertIn("data-avg-seconds", tpl)
         self.assertIn("data-percent-solved", tpl)
         self.assertIn("selectModelSort", tpl)
@@ -20325,8 +21083,11 @@ class ChatThinkToggleStaticTests(TestCase):
             return fh.read()
 
     def test_button_in_shared_header(self):
-        """"Кнопка в общей шапке base_chat.html — по ней достаются все 3 страницы."""
-        src = self._read("ai", "templates", "ai", "base_chat.html")
+        """Кнопка в общей шапке (_top_panel.html) — по ней достаются все 3 страницы."""
+        base = self._read("ai", "templates", "ai", "base_chat.html")
+        src = self._read("ai", "templates", "ai", "_top_panel.html")
+        # Шапка подключается базовым шаблоном, а не дублируется в нём.
+        self.assertIn('{% include "ai/_top_panel.html" %}', base)
         self.assertIn('id="thinkToggleBtn"', src)
         self.assertIn('class="think-toggle"', src)
         self.assertIn("hidden", src)
@@ -21822,6 +22583,14 @@ class UniversalUserSearchTests(TestCase):
         self.assertEqual(self._usernames("20"), set())
         self.assertEqual(self._usernames("201"), {"user_201"})
 
+    def test_id_prefix_query_is_exact_id(self):
+        """Форма id_12345 равнозначна точному id: без подстановок-подстрок."""
+        self.assertEqual(self._usernames("id_201"), {"user_201"})
+        self.assertEqual(self._usernames("ID_201"), {"user_201"})
+        self.assertEqual(self._usernames("id_999999"), set())
+        # Токен id_<id> распознаётся и в многословном запросе.
+        self.assertEqual(self._usernames("Ivanov id_201"), {"user_201"})
+
     def test_full_name_any_word_order(self):
         self.assertEqual(self._usernames("Ivanov Ivan"), {"user_201"})
         self.assertEqual(self._usernames("Ivan Ivanov"), {"user_201"})
@@ -21872,6 +22641,8 @@ class UniversalUserSearchTests(TestCase):
         self.assertFalse(identity_matches("Ivanov P.", texts=("Ivanov Ivan",)))
         self.assertTrue(identity_matches("201", ids=("201",)))
         self.assertFalse(identity_matches("20", ids=("201",)))
+        self.assertTrue(identity_matches("id_201", ids=("201",)))
+        self.assertFalse(identity_matches("id_20", ids=("201",)))
 
     def test_user_identity_resolve(self):
         from ai.services.user_search import UserIdentity
@@ -25328,6 +26099,290 @@ class PromptDebugRunnerTests(TestCase):
         self.assertEqual(dl_calls["n"], 0)
 
 
+class TaskLanguageStatusTests(_AdminViewRequestMixin, TestCase):
+    """Флаги решённости задач по языку: сервис, прогон по DL и ARM-эндпоинты."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.user = get_user_model().objects.create_user(
+            username="tl_admin", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="C-MPA")
+
+    def test_statuses_for_nodes_defaults_to_not_attempted(self):
+        from ai.models import TaskLanguageStatus
+        from ai.services.task_language_status import statuses_for_nodes
+
+        TaskLanguageStatus.objects.create(
+            course_id=1450, node_id=101,
+            programming_language_id=self.lang.id,
+            status=TaskLanguageStatus.STATUS_SOLVED,
+        )
+        TaskLanguageStatus.objects.create(
+            course_id=1450, node_id=102,
+            programming_language_id=self.lang.id,
+            status=TaskLanguageStatus.STATUS_ATTEMPTED,
+        )
+        statuses = statuses_for_nodes(
+            course_id=1450, programming_language_id=self.lang.id,
+            node_ids=[101, 102, 103],
+        )
+        self.assertEqual(statuses, {101: 1, 102: 2, 103: 0})
+
+    def test_refresh_statuses_classifies_and_upserts(self):
+        from ai.models import TaskLanguageStatus
+        from ai.services.task_language_status import refresh_statuses
+
+        solutions = {
+            101: [{"isCorrect": True}],
+            102: [{"isCorrect": False}, {"isCorrect": False}],
+            103: [],
+        }
+        calls = []
+
+        def fake_get(session_id, course_id, node_id, **kwargs):
+            calls.append((node_id, kwargs.get("extension")))
+            return {"solutions": solutions[node_id]}
+
+        with patch(
+            "ai.services.task_language_status.get_solutions_from_dl",
+            side_effect=fake_get,
+        ):
+            result = refresh_statuses(
+                session_id="DLSID-TEST", course_id=1450,
+                programming_language_id=self.lang.id,
+                node_ids=[101, 102, 103],
+            )
+
+        self.assertEqual(result["statuses"], {101: 1, 102: 2, 103: 0})
+        self.assertEqual(result["summary"], {"solved": 1, "attempted": 1, "none": 1})
+        self.assertEqual(result["extension"], "mpc")
+        self.assertTrue(result["refreshed_at"])
+        # /get-solutions ждёт расширение БЕЗ точки — единый маппинг языков.
+        self.assertTrue(calls)
+        self.assertTrue(all(ext == "mpc" for _node, ext in calls))
+
+        row = TaskLanguageStatus.objects.get(
+            course_id=1450, node_id=102,
+            programming_language_id=self.lang.id,
+        )
+        self.assertEqual(row.status, TaskLanguageStatus.STATUS_ATTEMPTED)
+        self.assertEqual(row.solutions_total, 2)
+        self.assertEqual(row.solutions_correct, 0)
+        self.assertEqual(row.file_extension, ".mpc")
+        self.assertIsNotNone(row.refreshed_at)
+
+    def test_refresh_statuses_fatal_error_aborts(self):
+        from ai.dl_api_client import DLUnauthorizedError
+        from ai.models import TaskLanguageStatus
+        from ai.services.task_language_status import (
+            TaskStatusRefreshError,
+            refresh_statuses,
+        )
+
+        with patch(
+            "ai.services.task_language_status.get_solutions_from_dl",
+            side_effect=DLUnauthorizedError(),
+        ):
+            with self.assertRaises(TaskStatusRefreshError):
+                refresh_statuses(
+                    session_id="DLSID-TEST", course_id=1450,
+                    programming_language_id=self.lang.id,
+                    node_ids=[201, 202],
+                )
+        self.assertFalse(
+            TaskLanguageStatus.objects.filter(course_id=1450).exists()
+        )
+
+    def test_refresh_statuses_node_error_preserves_old_flag(self):
+        from ai.dl_api_client import DLServerError
+        from ai.models import TaskLanguageStatus
+        from ai.services.task_language_status import refresh_statuses
+
+        TaskLanguageStatus.objects.create(
+            course_id=1450, node_id=201,
+            programming_language_id=self.lang.id,
+            status=TaskLanguageStatus.STATUS_SOLVED,
+            solutions_total=1, solutions_correct=1,
+        )
+
+        def fake_get(session_id, course_id, node_id, **kwargs):
+            if node_id == 201:
+                raise DLServerError("boom")
+            return {"solutions": []}
+
+        with patch(
+            "ai.services.task_language_status.get_solutions_from_dl",
+            side_effect=fake_get,
+        ):
+            result = refresh_statuses(
+                session_id="DLSID-TEST", course_id=1450,
+                programming_language_id=self.lang.id, node_ids=[201, 202],
+            )
+
+        self.assertIn("201", result["errors"])
+        self.assertEqual(result["statuses"][201], 1)
+        self.assertEqual(result["statuses"][202], 0)
+
+    def test_statuses_endpoint_returns_flags(self):
+        from ai.admin.arm import admin_arm_solve_task_statuses_view
+        from ai.models import TaskLanguageStatus
+
+        TaskLanguageStatus.objects.create(
+            course_id=1450, node_id=301,
+            programming_language_id=self.lang.id,
+            status=TaskLanguageStatus.STATUS_SOLVED,
+        )
+        request = self._admin_request(
+            self.user, method="post", path="/ai/admin/arm/solve/task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id,
+                "node_ids": [301, 302],
+            }),
+            content_type="application/json",
+        )
+        response = admin_arm_solve_task_statuses_view(request)
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["statuses"], {"301": 1, "302": 0})
+
+    def test_statuses_endpoint_rejects_empty_nodes(self):
+        from ai.admin.arm import admin_arm_solve_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post", path="/ai/admin/arm/solve/task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [],
+            }),
+            content_type="application/json",
+        )
+        response = admin_arm_solve_task_statuses_view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(json.loads(response.content)["ok"])
+
+    def test_statuses_endpoint_denies_arm_access(self):
+        from ai.admin.arm import admin_arm_solve_task_statuses_view
+
+        plain = get_user_model().objects.create_user(
+            username="tl_plain", password="x",
+        )
+        request = self._admin_request(
+            plain, method="post", path="/ai/admin/arm/solve/task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [1],
+            }),
+            content_type="application/json",
+        )
+        response = admin_arm_solve_task_statuses_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_refresh_endpoint_requires_dlsid(self):
+        from ai.admin.arm import admin_arm_solve_refresh_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post",
+            path="/ai/admin/arm/solve/refresh-task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [1],
+            }),
+            content_type="application/json",
+        )
+        response = admin_arm_solve_refresh_task_statuses_view(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("DLSID", json.loads(response.content)["message"])
+
+    def test_refresh_endpoint_updates_flags(self):
+        from ai.admin.arm import admin_arm_solve_refresh_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post",
+            path="/ai/admin/arm/solve/refresh-task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [401],
+            }),
+            content_type="application/json",
+        )
+        request.session["external_session_id"] = "DLSID-TEST"
+        expected = {
+            "statuses": {401: 2},
+            "summary": {"solved": 0, "attempted": 1, "none": 0},
+            "errors": {},
+            "extension": "mpc",
+            "refreshed_at": timezone.now(),
+        }
+        with patch("ai.admin.arm.refresh_statuses", return_value=expected):
+            response = admin_arm_solve_refresh_task_statuses_view(request)
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["statuses"], {"401": 2})
+        self.assertEqual(body["summary"]["attempted"], 1)
+
+    def test_refresh_endpoint_accepts_form_encoded_payload(self):
+        """Клиент ARM шлёт form-urlencoded, а node_ids — строкой через запятую.
+
+        Покрываем именно продакшн-формат: JSON-ветка тестами уже покрыта, а
+        расхождение форматов на клиенте и сервере давало 400 при исправном
+        дереве.
+        """
+        from urllib.parse import urlencode
+        from ai.admin.arm import admin_arm_solve_refresh_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post",
+            path="/ai/admin/arm/solve/refresh-task-statuses/",
+            data=urlencode({
+                "course_id": 1450, "language_id": self.lang.id,
+                "node_ids": "401,402",
+            }),
+            content_type="application/x-www-form-urlencoded",
+        )
+        request.session["external_session_id"] = "DLSID-TEST"
+        expected = {
+            "statuses": {401: 1, 402: 0},
+            "summary": {"solved": 1, "attempted": 0, "none": 1},
+            "errors": {},
+            "extension": "mpc",
+            "refreshed_at": timezone.now(),
+        }
+        with patch(
+            "ai.admin.arm.refresh_statuses", return_value=expected,
+        ) as refresh_mock:
+            response = admin_arm_solve_refresh_task_statuses_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            refresh_mock.call_args.kwargs["node_ids"], [401, 402],
+        )
+        self.assertEqual(json.loads(response.content)["statuses"], {"401": 1, "402": 0})
+
+    def test_refresh_endpoint_unexpected_error_stays_json(self):
+        """Незапланированный сбой — JSON 500, а не HTML-страница ошибки Django.
+
+        HTML ломал клиентский парсер, и пользователь видел «сессия истекла».
+        """
+        from ai.admin.arm import admin_arm_solve_refresh_task_statuses_view
+
+        request = self._admin_request(
+            self.user, method="post",
+            path="/ai/admin/arm/solve/refresh-task-statuses/",
+            data=json.dumps({
+                "course_id": 1450, "language_id": self.lang.id, "node_ids": [401],
+            }),
+            content_type="application/json",
+        )
+        request.session["external_session_id"] = "DLSID-TEST"
+        with patch(
+            "ai.admin.arm.refresh_statuses", side_effect=RuntimeError("boom"),
+        ):
+            response = admin_arm_solve_refresh_task_statuses_view(request)
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response["Content-Type"], "application/json")
+        body = json.loads(response.content)
+        self.assertFalse(body["ok"])
+        self.assertIn("boom", body["message"])
+
+
 class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
     """Страница /arm/prompt-debug/ и её старт: режим, попытки, права."""
 
@@ -25378,12 +26433,13 @@ class PromptDebugAdminViewTests(_AdminViewRequestMixin, TestCase):
         self.assertNotIn('id="armSaveSolutions"', html)
         # Фильтр промптов по языку: у опций есть language_id.
         self.assertIn('"language_id": %d' % self.lang.id, html)
-        # Чекбокс языка несёт value=id: по нему селектор промптов фильтрует
-        # список и восстанавливается язык из run_params. Без value браузер
-        # отдаёт "on" — селект промптов оказывался пустым.
+        # Язык — единственный single-select; опция несёт id, расширение и имя
+        # (data-ext/data-name), чтобы JS красил дерево и подставлял темы/промпты
+        # без запросов к DL.
+        self.assertIn('id="armLanguageSelect"', html)
         self.assertIn(
-            'class="arm-lang-check" id="armLangCheck%d" value="%d"'
-            % (self.lang.id, self.lang.id),
+            '<option value="%d" data-ext=".pas" data-name="Pascal">Pascal</option>'
+            % self.lang.id,
             html,
         )
 
@@ -26202,3 +27258,616 @@ class QueryBudgetTests(_AdminViewRequestMixin, TestCase):
 
         self.assertEqual(len(count_queries({})), 1)
         self.assertEqual(len(count_queries({"q": "Задача"})), 2)
+
+
+class FindErrorCatalogTests(SimpleTestCase):
+    def test_catalog_has_no_19_and_expected_codes(self):
+        from ai.services.find_error_catalog import ERROR_CATALOG, VALID_ERROR_CODES
+
+        self.assertEqual(set(ERROR_CATALOG), set(range(1, 19)) - {19} | {20, 21, 22})
+        self.assertNotIn(19, VALID_ERROR_CODES)
+
+    def test_eval_suffix_asks_for_last_line(self):
+        from ai.services.find_error_catalog import build_eval_suffix
+
+        suffix = build_eval_suffix()
+        self.assertIn("КОДЫ:", suffix)
+        self.assertIn("последней строкой", suffix)
+        self.assertIn("21.", suffix)
+
+
+class ParseErrorCodesTests(SimpleTestCase):
+    def test_parses_last_line_variants(self):
+        from ai.grading import parse_error_codes
+
+        self.assertEqual(parse_error_codes("разбор\nКОДЫ: 3, 17"), [3, 17])
+        self.assertEqual(parse_error_codes("КОДЫ: error_3 error_17"), [3, 17])
+        self.assertEqual(parse_error_codes("КОДЫ: 3 17 3"), [3, 17])
+        # Берём ПОСЛЕДНЮЮ строку, даже если слово «коды» встречалось раньше.
+        self.assertEqual(parse_error_codes("КОДЫ: 3\nещё разбор\nКОДЫ: 21"), [21])
+
+    def test_no_errors_tokens(self):
+        from ai.grading import parse_error_codes
+
+        self.assertEqual(parse_error_codes("КОДЫ: —"), [])
+        self.assertEqual(parse_error_codes("КОДЫ: нет"), [])
+        self.assertEqual(parse_error_codes("КОДЫ: ошибок нет"), [])
+        # «нет» в хвосте фразы не должно стирать уже перечисленные коды.
+        self.assertEqual(parse_error_codes("КОДЫ: 3, 17 — других нет"), [3, 17])
+
+    def test_missing_line_and_invalid_codes(self):
+        from ai.grading import parse_error_codes
+
+        self.assertEqual(parse_error_codes("просто разбор без строки"), [])
+        self.assertEqual(parse_error_codes(""), [])
+        self.assertEqual(parse_error_codes("КОДЫ: 19, 999, 3"), [3])
+
+
+class CompareErrorCodesTests(SimpleTestCase):
+    def test_partial_match_metrics(self):
+        from ai.grading import compare_error_codes
+
+        result = compare_error_codes([3, 17], [3, 17, 21])
+        self.assertEqual(result["matched"], [3, 17])
+        self.assertEqual(result["missed"], [21])
+        self.assertEqual(result["extra"], [])
+        self.assertFalse(result["exact"])
+        self.assertEqual(result["precision"], 1.0)
+        self.assertAlmostEqual(result["recall"], 2 / 3)
+        self.assertAlmostEqual(result["f1"], 0.8)
+
+    def test_extra_and_exact(self):
+        from ai.grading import compare_error_codes
+
+        result = compare_error_codes([3, 7], [3])
+        self.assertEqual(result["extra"], [7])
+        self.assertTrue(compare_error_codes([3, 17], [17, 3])["exact"])
+
+    def test_empty_sets(self):
+        from ai.grading import compare_error_codes
+
+        empty = compare_error_codes([], [])
+        self.assertTrue(empty["exact"])
+        self.assertEqual(empty["precision"], 1.0)
+        self.assertEqual(empty["recall"], 1.0)
+
+        missed = compare_error_codes([], [3])
+        self.assertFalse(missed["exact"])
+        self.assertEqual(missed["recall"], 0.0)
+
+    def test_aggregate_per_code(self):
+        from ai.grading import aggregate_error_code_metrics
+
+        report = aggregate_error_code_metrics([
+            {"parsed_codes": [3], "expected_codes": [3, 17]},
+            {"parsed_codes": [3], "expected_codes": [3]},
+        ])
+        self.assertEqual(report["cases"], 2)
+        self.assertEqual(report["exact"], 1)
+        self.assertEqual(report["per_code"][3]["expected"], 2)
+        self.assertEqual(report["per_code"][3]["found"], 2)
+        self.assertEqual(report["per_code"][17]["missed"], 1)
+        self.assertEqual(report["per_code"][17]["recall"], 0.0)
+
+
+class ImportFindErrorCasesTests(TestCase):
+    def setUp(self):
+        self.lang = ProgrammingLanguage.objects.create(language_name="C-MPA")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Одномерный массив", programming_language=self.lang,
+        )
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        group = self.root / "1. Отчисление"
+        case = group / "1"
+        case.mkdir(parents=True)
+        (case / "1.mpc").write_text("int __bits(8) b[20];\nvoid main() {}\n", encoding="utf-8")
+        (case / "error_3.txt").write_bytes("Не инициализирована\n".encode("cp1251"))
+        (case / "error_17.txt").write_bytes("Нет __bits\n".encode("cp1251"))
+        (group / "url.txt").write_bytes(
+            "https://dl.gsu.by/task.jsp?nid=123456&cid=42\n".encode("cp1251")
+        )
+        (group / "info.txt").write_bytes("Найдите ошибку\n".encode("cp1251"))
+
+    def _run(self, *args, **kwargs):
+        import io
+
+        from django.core.management import call_command
+
+        out = io.StringIO()
+        call_command(
+            "import_find_error_cases", str(self.root),
+            "--dataset", "ds", "--language", "C-MPA",
+            "--topic", "Одномерный массив", *args, stdout=out, **kwargs,
+        )
+        return out.getvalue()
+
+    def test_dry_run_writes_nothing(self):
+        output = self._run("--dry-run")
+        self.assertIn("Dry-run", output)
+        self.assertFalse(FindErrorCaseGroup.objects.exists())
+
+    def test_creates_group_case_labels_and_parses_url(self):
+        output = self._run()
+        self.assertIn("кейсов +1", output)
+        group = FindErrorCaseGroup.objects.get(source_ref="ds/1. Отчисление")
+        self.assertEqual(group.dl_node_id, 123456)
+        self.assertEqual(group.dl_course_id, 42)
+        self.assertEqual(group.statement_source, "info_txt")
+        self.assertIn("Найдите ошибку", group.statement)
+        case = FindErrorCase.objects.get(source_ref="ds/1. Отчисление/1")
+        self.assertEqual(case.status, FindErrorCase.STATUS_READY)
+        self.assertEqual(sorted(case.labels.values_list("code", flat=True)), [3, 17])
+
+    def test_reimport_is_idempotent_and_keeps_manual_label_edit(self):
+        self._run()
+        case = FindErrorCase.objects.get(source_ref="ds/1. Отчисление/1")
+        label = case.labels.get(code=3)
+        label.text = "ручная правка"
+        label.save()
+
+        output = self._run()
+        self.assertIn("пропущено 1", output)
+        label.refresh_from_db()
+        self.assertEqual(label.text, "ручная правка")
+
+    def test_force_updates_and_source_change_updates(self):
+        self._run()
+        case = FindErrorCase.objects.get(source_ref="ds/1. Отчисление/1")
+        case.labels.filter(code=3).update(text="ручная правка")
+
+        # Исходник не изменился: без --force пропуск.
+        self._run()
+        self.assertEqual(case.labels.get(code=3).text, "ручная правка")
+
+        # Исходник изменился: обновляемся и затираем метки (источник — истина).
+        (self.root / "1. Отчисление" / "1" / "1.mpc").write_text(
+            "int __bits(8) b[21];\n", encoding="utf-8"
+        )
+        self._run()
+        case.refresh_from_db()
+        self.assertIn("b[21]", case.code)
+        self.assertEqual(case.labels.get(code=3).text, "Не инициализирована")
+
+    def test_unknown_language_is_a_clear_error(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError) as ctx:
+            call_command(
+                "import_find_error_cases", str(self.root),
+                "--dataset", "ds", "--language", "Нет такого",
+            )
+        self.assertIn("Язык не найден", str(ctx.exception))
+        self.assertIn("C-MPA", str(ctx.exception))
+
+
+class SeedFindErrorPromptTests(TestCase):
+    def setUp(self):
+        self.lang = ProgrammingLanguage.objects.create(language_name="C-MPA")
+        self.topic = Topic.objects.create(
+            topic_name_ru="Одномерный массив", programming_language=self.lang,
+        )
+
+    def _seed(self, *args):
+        import io
+
+        from django.core.management import call_command
+
+        out = io.StringIO()
+        call_command(
+            "seed_find_error_prompt", "--language", "C-MPA",
+            "--topic", "Одномерный массив", *args, stdout=out,
+        )
+        return out.getvalue()
+
+    def test_creates_prompt_and_is_create_only(self):
+        self._seed()
+        prompt = Prompt.objects.get(mode="find_error")
+        self.assertEqual(prompt.topic, self.topic)
+        self.assertIn("__bits", prompt.prompt_text_ru)
+        prompt.prompt_text_ru = "изменено в админке"
+        prompt.save()
+
+        output = self._seed()
+        self.assertIn("Текст не изменён", output)
+        prompt.refresh_from_db()
+        self.assertEqual(prompt.prompt_text_ru, "изменено в админке")
+
+        self._seed("--force")
+        prompt.refresh_from_db()
+        self.assertIn("__bits", prompt.prompt_text_ru)
+
+    def test_unknown_topic_lists_candidates(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError) as ctx:
+            call_command(
+                "seed_find_error_prompt", "--language", "C-MPA", "--topic", "Нет темы",
+            )
+        self.assertIn("Тема", str(ctx.exception))
+
+
+class PromptLabRunnerTests(TransactionTestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="labuser", password="x", is_staff=True,
+        )
+        self.lang = ProgrammingLanguage.objects.create(language_name="C-MPA")
+        self.group = FindErrorCaseGroup.objects.create(
+            dataset="ds", name="Группа", source_ref="ds/Группа",
+            programming_language=self.lang, topic_name="Массив",
+            statement="Найдите ошибку",
+        )
+        self.case_exact = FindErrorCase.objects.create(
+            group=self.group, name="1", source_ref="ds/Группа/1",
+            code="int b[20];", source_hash="h1",
+        )
+        FindErrorCaseLabel.objects.create(case=self.case_exact, code=3)
+        self.case_partial = FindErrorCase.objects.create(
+            group=self.group, name="2", source_ref="ds/Группа/2",
+            code="int b[20];", source_hash="h2",
+        )
+        FindErrorCaseLabel.objects.create(case=self.case_partial, code=3)
+        FindErrorCaseLabel.objects.create(case=self.case_partial, code=21)
+
+    def _wait(self, run, timeout=8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            run.refresh_from_db()
+            if run.status != PromptLabRun.STATUS_RUNNING:
+                return run
+            time.sleep(0.05)
+        self.fail("Прогон не завершился за отведённое время")
+
+    def test_run_records_results_metrics_and_request_log(self):
+        from ai.prompt_lab_runner import start_prompt_lab_run
+
+        async def handler(message, client_id):
+            self.assertIn("КОДЫ:", message)
+            return "Разбор.\nКОДЫ: 3", 5, False, False, 10
+
+        models = [{"key": "Ollama_test", "title": "Test", "handler": handler}]
+        with patch("ai.prompt_lab_runner._resolve_models", return_value=models):
+            run = start_prompt_lab_run(
+                user=self.user,
+                case_ids=[self.case_exact.pk, self.case_partial.pk],
+                model_keys=["Ollama_test"],
+                prompt_id=None,
+                ui_language="ru",
+                include_eval_suffix=True,
+            )
+            run = self._wait(run)
+
+        self.assertEqual(run.status, PromptLabRun.STATUS_COMPLETED)
+        results = {r.case.name: r for r in run.results.all()}
+        self.assertTrue(results["1"].exact_match)
+        self.assertEqual(results["1"].parsed_codes, [3])
+        self.assertFalse(results["2"].exact_match)
+        self.assertEqual(results["2"].missed_codes, [21])
+        self.assertEqual(results["2"].recall, 0.5)
+        self.assertIn("КОДЫ:", results["1"].message)
+        report = run.report
+        self.assertEqual(report["models"][0]["exact"], 1)
+        self.assertEqual(report["models"][0]["cases"], 2)
+        # JSONField отдаёт ключи словаря строками после чтения из БД.
+        self.assertEqual(report["models"][0]["per_code"]["21"]["missed"], 1)
+        # Один вызов модели на каждую пару «модель × кейс».
+        self.assertEqual(AIRequestLog.objects.count(), 2)
+        log = AIRequestLog.objects.first()
+        self.assertEqual(log.mode, AIRequestLog.MODE_PROMPT_DEBUG)
+        self.assertEqual(log.source, AIRequestLog.SOURCE_ARM)
+        self.assertEqual(log.batch_run_id, "")
+        self.assertEqual(log.tokens, 5)
+        self.assertEqual(log.tokens_prompt, 10)
+
+    def test_validation_errors(self):
+        from ai.prompt_lab_runner import PromptLabError, start_prompt_lab_run
+
+        with self.assertRaises(PromptLabError):
+            start_prompt_lab_run(
+                user=self.user, case_ids=[], model_keys=["Ollama_test"],
+            )
+        with self.assertRaises(PromptLabError):
+            start_prompt_lab_run(
+                user=self.user, case_ids=[self.case_exact.pk], model_keys=[],
+            )
+
+        other = Prompt.objects.create(
+            mode="solve", prompt_name_ru="Реши", prompt_text_ru="x",
+        )
+        with patch("ai.prompt_lab_runner._resolve_models", return_value=[
+            {"key": "Ollama_test", "title": "Test", "handler": AsyncMock()},
+        ]):
+            with self.assertRaises(PromptLabError):
+                start_prompt_lab_run(
+                    user=self.user, case_ids=[self.case_exact.pk],
+                    model_keys=["Ollama_test"], prompt_id=other.pk,
+                )
+
+    def test_cancel_orphan_run(self):
+        from ai.prompt_lab_runner import cancel_prompt_lab_run
+
+        run = PromptLabRun.objects.create(
+            run_id=uuid.uuid4().hex, status=PromptLabRun.STATUS_RUNNING,
+            case_count=1, case_ids=[self.case_exact.pk],
+        )
+        self.assertTrue(cancel_prompt_lab_run(run.run_id))
+        run.refresh_from_db()
+        self.assertEqual(run.status, PromptLabRun.STATUS_CANCELLED)
+        self.assertFalse(cancel_prompt_lab_run(run.run_id))
+
+
+class PromptLabAdminTests(_AdminViewRequestMixin, TestCase):
+    def setUp(self):
+        # Вью лаборатории проверяют права сами (can_access_prompt_lab), поэтому
+        # зовём их напрямую: admin_view дополнительно требует external id и
+        # «свежую» сессию, которых у RequestFactory-теста нет.
+        self.factory = RequestFactory()
+        self.staff = get_user_model().objects.create_user(
+            username="labstaff", password="x", is_staff=True,
+        )
+
+    def _call(self, user, view, method="get", path="/ai/admin/prompts/lab/",
+              data=None, content_type=None):
+        request = self._admin_request(
+            user, method=method, path=path, data=data, content_type=content_type,
+        )
+        return view(request)
+
+    def test_page_requires_access(self):
+        from ai.admin.prompt_lab import admin_prompt_lab_view
+
+        response = self._call(AnonymousUser(), admin_prompt_lab_view)
+        self.assertEqual(response.status_code, 403)
+        response = self._call(self.staff, admin_prompt_lab_view)
+        self.assertEqual(response.status_code, 200)
+
+    def test_key_grants_access_to_non_staff(self):
+        from ai.admin.prompt_lab import admin_prompt_lab_view
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        user = get_user_model().objects.create_user(username="labpd", password="x")
+        perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.prompt_lab", defaults={"label": "Лаборатория", "section": "page"},
+        )
+        admin_perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.admin", defaults={"label": "Админка", "section": "page"},
+        )
+        group = AIAccessGroup.objects.create(name="Тестовая лаборатория")
+        group.permissions.add(perm, admin_perm)
+        group.users.add(user)
+        response = self._call(user, admin_prompt_lab_view)
+        self.assertEqual(response.status_code, 200)
+
+    def test_start_endpoint_rejects_empty_payload(self):
+        from ai.admin.prompt_lab import admin_prompt_lab_start_view
+
+        response = self._call(
+            self.staff, admin_prompt_lab_start_view,
+            method="post", path="/ai/admin/prompts/lab/start/",
+            data=json.dumps({}), content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(json.loads(response.content)["ok"])
+
+    def test_status_and_export(self):
+        from ai.admin.prompt_lab import (
+            admin_prompt_lab_export_view,
+            admin_prompt_lab_result_body_view,
+            admin_prompt_lab_status_view,
+        )
+
+        run = PromptLabRun.objects.create(
+            run_id="run-export-1", status=PromptLabRun.STATUS_COMPLETED,
+            case_count=1, case_ids=[], model_keys=["Ollama_test"],
+            model_titles=["Test"], prompt_name="P",
+        )
+        group = FindErrorCaseGroup.objects.create(
+            dataset="ds", name="Группа", source_ref="ds/Группа",
+        )
+        case = FindErrorCase.objects.create(
+            group=group, name="1", source_ref="ds/Группа/1", code="x", source_hash="h",
+        )
+        result = PromptLabResult.objects.create(
+            run=run, case=case, case_ref=case.source_ref, case_name="1",
+            group_name="Группа", model_key="Ollama_test", model_title="Test",
+            status=PromptLabResult.STATUS_OK, parsed_codes=[3],
+            expected_codes=[3], matched_codes=[3], exact_match=True,
+            precision=1.0, recall=1.0, f1=1.0,
+            raw_response="Разбор.\nКОДЫ: 3",
+        )
+        response = self._call(
+            self.staff, admin_prompt_lab_status_view,
+            path="/ai/admin/prompts/lab/status/?run_id=run-export-1",
+        )
+        self.assertEqual(response.status_code, 200)
+        snapshot = json.loads(response.content)["snapshot"]
+        self.assertTrue(snapshot["results"][0]["exact_match"])
+
+        response = self._call(
+            self.staff, admin_prompt_lab_export_view,
+            path="/ai/admin/prompts/lab/export/?run_id=run-export-1",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
+        self.assertIn("Ожидаемые коды", response.content.decode("utf-8-sig"))
+
+        response = admin_prompt_lab_result_body_view(
+            self._admin_request(
+                self.staff, path=f"/ai/admin/prompts/lab/result/{result.pk}/body/",
+            ),
+            result.pk,
+        )
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)["result"]
+        self.assertEqual(body["parsed_codes"], [3])
+        self.assertIn("КОДЫ: 3", body["raw_response"])
+
+
+class FindErrorCaseAdminTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.staff = get_user_model().objects.create_user(
+            username="fe_staff", password="x", is_staff=True,
+        )
+        self.group = FindErrorCaseGroup.objects.create(
+            dataset="ds", name="Группа", source_ref="ds/Группа",
+            dl_node_id=123, dl_course_id=9, statement="Старое условие",
+        )
+
+    def _request(self, user):
+        request = self.factory.get("/ai/admin/ai/finderrorcase/")
+        request.user = user
+        return request
+
+    def test_access_staff_and_key_holder(self):
+        from ai.admin.find_error_cases import FindErrorCaseAdmin
+        from ai.admin.site import ai_admin_site
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        admin_obj = FindErrorCaseAdmin(FindErrorCase, ai_admin_site)
+        self.assertTrue(admin_obj.has_view_permission(self._request(self.staff)))
+        self.assertFalse(admin_obj.has_view_permission(self._request(AnonymousUser())))
+
+        user = get_user_model().objects.create_user(username="fe_pd", password="x")
+        perm, _ = AIAdminGroupPermission.objects.get_or_create(
+            key="page.prompt_lab", defaults={"label": "Лаборатория", "section": "page"},
+        )
+        group, _ = AIAccessGroup.objects.get_or_create(name="Тестовая база ошибок")
+        group.permissions.add(perm)
+        group.users.add(user)
+        self.assertTrue(admin_obj.has_view_permission(self._request(user)))
+        # Контент-владелец не удаляет историю — удаление только staff/superuser.
+        self.assertFalse(admin_obj.has_delete_permission(self._request(user)))
+        self.assertTrue(admin_obj.has_delete_permission(self._request(self.staff)))
+
+    def test_inline_code_choices_from_catalog(self):
+        from ai.admin.find_error_cases import FindErrorCaseLabelInline
+        from ai.admin.site import ai_admin_site
+
+        inline = FindErrorCaseLabelInline(FindErrorCase, ai_admin_site)
+        field = inline.formfield_for_dbfield(
+            FindErrorCaseLabel._meta.get_field("code"), self._request(self.staff),
+        )
+        values = [value for value, _label in field.widget.choices]
+        self.assertIn(3, values)
+        self.assertIn(22, values)
+        self.assertNotIn(19, values)
+
+    def test_add_forms_hide_import_fields(self):
+        from ai.admin.find_error_cases import FindErrorCaseAdmin, FindErrorCaseGroupAdmin
+        from ai.admin.site import ai_admin_site
+
+        group_admin = FindErrorCaseGroupAdmin(FindErrorCaseGroup, ai_admin_site)
+        group_fields = [
+            name for _title, options in group_admin.get_fieldsets(self._request(self.staff))
+            for name in options["fields"]
+        ]
+        self.assertIn("dl_node_id", group_fields)
+        self.assertIn("statement", group_fields)
+        for hidden in ("dataset", "source_ref", "statement_source", "statement_updated_at"):
+            self.assertNotIn(hidden, group_fields)
+
+        case_admin = FindErrorCaseAdmin(FindErrorCase, ai_admin_site)
+        case_fields = [
+            name for _title, options in case_admin.get_fieldsets(self._request(self.staff))
+            for name in options["fields"]
+        ]
+        self.assertIn("group", case_fields)
+        self.assertIn("code", case_fields)
+        for hidden in ("source_ref", "source_hash", "notes"):
+            self.assertNotIn(hidden, case_fields)
+
+        # И сами ModelForm'ы добавления не тянут технические поля импорта.
+        group_admin = FindErrorCaseGroupAdmin(FindErrorCaseGroup, ai_admin_site)
+        group_form = group_admin.get_form(self._request(self.staff), None)
+        self.assertNotIn("source_ref", group_form.base_fields)
+        self.assertNotIn("dataset", group_form.base_fields)
+        self.assertIn("dl_node_id", group_form.base_fields)
+        case_admin = FindErrorCaseAdmin(FindErrorCase, ai_admin_site)
+        case_form = case_admin.get_form(self._request(self.staff), None)
+        self.assertNotIn("source_ref", case_form.base_fields)
+        self.assertIn("code", case_form.base_fields)
+
+    def test_manual_group_gets_auto_source_fields(self):
+        from ai.admin.find_error_cases import FindErrorCaseGroupAdmin
+        from ai.admin.site import ai_admin_site
+
+        admin_obj = FindErrorCaseGroupAdmin(FindErrorCaseGroup, ai_admin_site)
+        group = FindErrorCaseGroup(name="Новая задача", statement="Условие руками")
+        admin_obj.save_model(
+            self._request(self.staff), group, SimpleNamespace(initial={}), change=False,
+        )
+        group.refresh_from_db()
+        self.assertEqual(group.dataset, "manual")
+        self.assertEqual(group.source_ref, "manual/Новая задача")
+        self.assertEqual(group.statement_source, "manual")
+        self.assertIsNotNone(group.statement_updated_at)
+
+        # Коллизия ссылки (модель запрещает одинаковые dataset+name, поэтому
+        # занимаем ссылку записью с другим именем) — получаем суффикс.
+        FindErrorCaseGroup.objects.create(
+            dataset="manual", name="Другая", source_ref="manual/Ещё задача",
+        )
+        twin = FindErrorCaseGroup(name="Ещё задача")
+        admin_obj.save_model(
+            self._request(self.staff), twin, SimpleNamespace(initial={}), change=False,
+        )
+        twin.refresh_from_db()
+        self.assertEqual(twin.source_ref, "manual/Ещё задача (2)")
+
+    def test_manual_case_gets_auto_source_ref(self):
+        from ai.admin.find_error_cases import FindErrorCaseAdmin
+        from ai.admin.site import ai_admin_site
+
+        admin_obj = FindErrorCaseAdmin(FindErrorCase, ai_admin_site)
+        case = FindErrorCase(group=self.group, name="1", code="void main() {}")
+        admin_obj.save_model(
+            self._request(self.staff), case, SimpleNamespace(initial={}), change=False,
+        )
+        case.refresh_from_db()
+        self.assertEqual(case.source_ref, "ds/Группа/1")
+        self.assertEqual(case.created_by, self.staff)
+
+    def test_fetch_statement_updates_group(self):
+        from unittest.mock import patch
+
+        from ai.admin.find_error_cases import _fetch_statement_for_group
+
+        with patch(
+            "ai.admin.find_error_cases.resolve_dl_session_id", return_value="DLSID",
+        ), patch(
+            "ai.admin.find_error_cases.fetch_task_info",
+            return_value={"statement": " Новое условие "},
+        ):
+            ok, message = _fetch_statement_for_group(self.group, self._request(self.staff))
+        self.assertTrue(ok)
+        self.assertIn("обновлено", message)
+        self.group.refresh_from_db()
+        self.assertEqual(self.group.statement, "Новое условие")
+        self.assertEqual(self.group.statement_source, "dl")
+
+    def test_fetch_statement_without_session_raises(self):
+        from unittest.mock import patch
+
+        from ai.admin.find_error_cases import _fetch_statement_for_group
+        from ai.dl_api_client import DLApiError
+
+        with patch("ai.admin.find_error_cases.resolve_dl_session_id", return_value=""):
+            with self.assertRaises(DLApiError):
+                _fetch_statement_for_group(self.group, self._request(self.staff))
+
+
+class FindErrorPromptDocsTests(SimpleTestCase):
+    def test_chapter_registered_and_readable(self):
+        from ai.services.docs import get_chapter, read_chapter_markdown
+
+        chapter = get_chapter("find-error-prompt")
+        self.assertIsNotNone(chapter)
+        self.assertEqual(chapter.min_role, "prompt_developer")
+        document = read_chapter_markdown("find-error-prompt")
+        self.assertIn("КОДЫ", document["text"])
+        self.assertIn("Лаборатория промптов", document["text"])

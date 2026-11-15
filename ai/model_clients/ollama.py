@@ -3,7 +3,8 @@
 Использует официальную Python-библиотеку ``ollama`` (``from ollama import Client``).
 Cloud-модели (glm-5.2:cloud, deepseek-v4.1-flash:cloud, deepseek-v4-pro:cloud,
 gemma4:cloud, nemotron-3-super:cloud, kimi-k2.7-code:cloud, kimi-k2.6:cloud,
-gpt-oss:20b-cloud, gpt-oss:120b-cloud) требуют bearer-токен ``OLLAMA_API_KEY`` и
+gpt-oss:20b-cloud, gpt-oss:120b-cloud, beam:cloud) требуют bearer-токен
+``OLLAMA_API_KEY`` и
 хост ``https://ollama.com`` (облачный REST живёт на ``https://ollama.com/api/*``).
 Локальный Ollama работает без ключа на ``http://localhost:11434``.
 
@@ -149,6 +150,10 @@ OLLAMA_MODELS: dict[str, dict] = {
     "Ollama_MiniMax_M3_1_Flash_Cloud": {
         "model": "minimax-m3.1-flash:cloud",
         "description": "Ollama MiniMax M3.1 Flash — быстрый чат (thinking отдельным полем)",
+    },
+    "Ollama_Beam_Cloud": {
+        "model": "beam:cloud",
+        "description": "Ollama Beam — reasoning (Reflection, 501B MoE, текст без зрения)",
     },
 }
 

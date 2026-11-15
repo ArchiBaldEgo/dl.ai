@@ -56,6 +56,27 @@ def display_name_for_user(user) -> str:
     return username
 
 
+def surname_for_user(user) -> str:
+    """Фамилия для сортировки списков (ФИО, DL-справочник, первое слово).
+
+    ``last_name`` может быть пустым у DL-провижненных аккаунтов — тогда
+    берём ``external_last_name``; если и его нет, первое слово отображаемого
+    имени (для формата «Фамилия Имя Отчество» это фамилия).
+    """
+    if not user:
+        return ""
+    last = (getattr(user, "last_name", "") or "").strip()
+    if last:
+        return last
+    account = _external_account(user)
+    if account is not None:
+        ext_last = (getattr(account, "external_last_name", "") or "").strip()
+        if ext_last:
+            return ext_last
+    display = display_name_for_user(user)
+    return display.split()[0] if display else ""
+
+
 def dl_id_for_user(user) -> str:
     """DL-идентификатор пользователя (``external_user_id`` либо username).
 

@@ -722,8 +722,17 @@ function initProblemSelectors(mode) {
     }
 
     function selectFirstIfSingle(selectElement) {
-        if (selectElement && selectElement.options.length === 1) {
-            selectElement.selectedIndex = 0;
+        // Placeholder («Выберите …», value="") уже добавлен, поэтому одна
+        // реальная опция даёт options.length === 2. Выбираем единственную
+        // НЕПУСТУЮ опцию — так препромпт темы подставляется студенту сразу,
+        // без ручного выбора (и то же работает для единственного языка/темы).
+        if (!selectElement) return;
+        const realOptions = Array.prototype.filter.call(
+            selectElement.options,
+            function (option) { return option.value !== ''; }
+        );
+        if (realOptions.length === 1) {
+            selectElement.value = realOptions[0].value;
         }
     }
 
@@ -954,6 +963,7 @@ function getCsrfToken() {
     return '';
 }
 
+// function getClientId()
 function resolveClientId() {
     var sessionIdFromMeta = getMetaContent('external-session-id');
     var sessionId = sessionIdFromMeta || getCookieValue('DLSID');
@@ -1510,6 +1520,21 @@ var localization = {
         dlTestOutput: "Выходные данные (эталон)",
         dlTestTruncated: "(начало)",
         dlTestUnavailable: "DL не выдал данные теста: выдача тестовых данных запрещена настройками курса или данные теста недоступны.",
+        // PDF в чате: прикрепить можно только моделью со зрением.
+        pdfAttach: "PDF",
+        pdfAttachTitle: "Прикрепить PDF (только для моделей со зрением)",
+        pdfRemove: "Убрать PDF",
+        pdfUploading: "Загрузка PDF…",
+        pdfReady: "PDF приложен: {0}",
+        pdfOnly: "Можно прикреплять только PDF-файлы",
+        pdfTooLarge: "PDF слишком большой (максимум {0} МБ)",
+        pdfBad: "Не удалось прочитать PDF",
+        pdfNoText: "В PDF не найден текст (возможно, это сканы)",
+        pdfEncrypted: "PDF защищён паролем — прикрепите другой файл",
+        pdfActiveContent: "PDF содержит активное содержимое и отклонён",
+        pdfNoVision: "Эта модель не умеет работать с PDF. Выберите модель со зрением.",
+        pdfSendFailed: "Не удалось отправить PDF на сервер",
+        sessionExpired: "Сессия истекла. Обновите страницу.",
         voiceStatus: {
             listening: "Запись голоса",
             recognized: "Распознано: ",
@@ -1638,6 +1663,20 @@ var localization = {
         dlTestOutput: "Output (expected)",
         dlTestTruncated: "(beginning)",
         dlTestUnavailable: "DL did not provide the test data: test-data issuance is disabled by the course settings or the test data is unavailable.",
+        pdfAttach: "PDF",
+        pdfAttachTitle: "Attach a PDF (vision models only)",
+        pdfRemove: "Remove PDF",
+        pdfUploading: "Uploading PDF…",
+        pdfReady: "PDF attached: {0}",
+        pdfOnly: "Only PDF files can be attached",
+        pdfTooLarge: "The PDF is too large (maximum {0} MB)",
+        pdfBad: "Could not read the PDF",
+        pdfNoText: "No text found in the PDF (it may be scanned)",
+        pdfEncrypted: "The PDF is password-protected — attach another file",
+        pdfActiveContent: "The PDF contains active content and was rejected",
+        pdfNoVision: "This model cannot work with PDFs. Choose a model with vision.",
+        pdfSendFailed: "Failed to send the PDF to the server",
+        sessionExpired: "The session has expired. Please reload the page.",
         voiceStatus: {
             listening: "Voice recording",
             recognized: "Recognized: ",
@@ -1765,6 +1804,20 @@ var localization = {
         dlTestOutput: "Sortie (attendue)",
         dlTestTruncated: "(début)",
         dlTestUnavailable: "DL n'a pas fourni les données du test : la diffusion des données de test est interdite par les paramètres du cours ou les données sont indisponibles.",
+        pdfAttach: "PDF",
+        pdfAttachTitle: "Joindre un PDF (modèles avec vision uniquement)",
+        pdfRemove: "Retirer le PDF",
+        pdfUploading: "Chargement du PDF…",
+        pdfReady: "PDF joint : {0}",
+        pdfOnly: "Seuls les fichiers PDF peuvent être joints",
+        pdfTooLarge: "Le PDF est trop volumineux (maximum {0} Mo)",
+        pdfBad: "Impossible de lire le PDF",
+        pdfNoText: "Aucun texte trouvé dans le PDF (il s'agit peut-être de scans)",
+        pdfEncrypted: "Le PDF est protégé par mot de passe — joignez un autre fichier",
+        pdfActiveContent: "Le PDF contient du contenu actif et a été rejeté",
+        pdfNoVision: "Ce modèle ne peut pas traiter les PDF. Choisissez un modèle avec vision.",
+        pdfSendFailed: "Échec de l'envoi du PDF au serveur",
+        sessionExpired: "La session a expiré. Rechargez la page.",
         voiceStatus: {
             listening: "Enregistrement vocal",
             recognized: "Reconnu : ",
@@ -2359,10 +2412,14 @@ function initUserDocs() {
 
     var titleEl = document.getElementById('aiDocsTitle');
     var bodyEl = document.getElementById('aiDocsBody');
+    var chaptersEl = document.getElementById('aiDocsChapters');
     var downloadEl = document.getElementById('aiDocsDownload');
     var closeEl = document.getElementById('aiDocsClose');
     var pollTimer = null;
     var fingerprint = null;
+    // Текущая вкладка модалки: сервер по умолчанию отдаёт «user». Список
+    // вкладок приходит в ответе (chapters) — не хардкодим слаги на клиенте.
+    var currentChapter = '';
 
     function localize() {
         var label = getUiString('userDocs', 'Инструкция пользователя');
@@ -2380,12 +2437,46 @@ function initUserDocs() {
         return selectLang.options[selectLang.selectedIndex].getAttribute('language') || '';
     }
 
-    function docsUrl(lang) {
-        return '/ai/docs/' + (lang ? '?lang=' + encodeURIComponent(lang) : '');
+    function docsUrl(lang, chapter) {
+        var params = [];
+        if (chapter) params.push('chapter=' + encodeURIComponent(chapter));
+        if (lang) params.push('lang=' + encodeURIComponent(lang));
+        return '/ai/docs/' + (params.length ? '?' + params.join('&') : '');
+    }
+
+    // Вкладки глав (одна глава → панель скрыта: не плодим пустую полосу).
+    // Заголовки приходят с сервера уже локализованными/экранированными —
+    // textContent, никакого innerHTML.
+    function renderChapters(data) {
+        if (!chaptersEl) return;
+        var chapters = data.chapters || [];
+        chaptersEl.innerHTML = '';
+        if (chapters.length < 2) {
+            chaptersEl.hidden = true;
+            return;
+        }
+        chapters.forEach(function(chapter) {
+            var tab = document.createElement('button');
+            tab.type = 'button';
+            tab.className = 'ai-docs-chapter-tab' + (chapter.slug === data.chapter ? ' active' : '');
+            tab.setAttribute('role', 'tab');
+            tab.setAttribute('aria-selected', chapter.slug === data.chapter ? 'true' : 'false');
+            tab.dataset.chapter = chapter.slug;
+            tab.textContent = chapter.title;
+            tab.addEventListener('click', function() {
+                if (currentChapter === chapter.slug) return;
+                currentChapter = chapter.slug;
+                fetchDocs();
+            });
+            chaptersEl.appendChild(tab);
+        });
+        chaptersEl.hidden = false;
     }
 
     function applyDocs(data) {
+        currentChapter = data.chapter || currentChapter;
         titleEl.textContent = data.title || getUiString('userDocs', 'Инструкция пользователя');
+        renderChapters(data);
         var scroll = bodyEl.scrollTop;
         bodyEl.innerHTML = data.html;
         // Честная плашка о сбое рантайм-перевода (на проде translate.google.com
@@ -2406,7 +2497,7 @@ function initUserDocs() {
 
     function fetchDocs() {
         bodyEl.textContent = getUiString('docsLoadError', 'Не удалось загрузить инструкцию') + '…';
-        fetch(docsUrl(currentUiLang()), {credentials: 'same-origin'})
+        fetch(docsUrl(currentUiLang(), currentChapter), {credentials: 'same-origin'})
             .then(function(response) {
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 return response.json();
@@ -2430,7 +2521,7 @@ function initUserDocs() {
     function startPolling() {
         stopPolling();
         pollTimer = setInterval(function() {
-            fetch(docsUrl(currentUiLang()), {credentials: 'same-origin'})
+            fetch(docsUrl(currentUiLang(), currentChapter), {credentials: 'same-origin'})
                 .then(function(response) {
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     return response.json();
@@ -2486,13 +2577,17 @@ document.addEventListener('DOMContentLoaded', initCommonPageActions);
 // Каждое пришедшее по WS сообщение диалога (эхо пользователя «Обрабатываю
 // запрос пользователя. Вы: …» + ответ ИИ «Запрос успешно обработан…») сохраняется
 // в localStorage и восстанавливается после перезагрузки страницы, чтобы переписка
-// не пропадала, пока пользователь не нажмёт «Clear Context». Ключ привязан к
-// пользователю (client_id = dlsid_<DLSID>) и странице (pathname) — у разных
-// страниц (чат / решить / ошибка) и разных пользователей отдельные переписки.
+// не пропадала, пока пользователь не нажмёт «Clear Context». Ключ привязан
+// ТОЛЬКО к пользователю (client_id = dlsid_<DLSID>): чат, «Реши задачу» и
+// «В чём ошибка» делят одну ленту, чтобы история не терялась при переходах.
 // Служебные/транзитные сообщения («Контекст очищен», «Слишком много сообщений»,
 // «Что-то пошло не так» и т.п.) не содержат маркеров диалога и не сохраняются.
 var AI_MSGS_KEY_PREFIX = 'ai_msgs_';
 var AI_MSGS_MAX_CHARS = 2000000; // ~2 МБ上限, чтобы не упереться в квоту localStorage
+
+// Старые (до единой ленты) ключи были привязаны к pathname. При первом
+// открытии любой из трёх страниц склеиваем их в общий ключ и удаляем.
+var AI_MSGS_LEGACY_PATHS = ['/ai/chat', '/ai/solve-problem', '/ai/find-error'];
 
 // [[DL]]-записи в том же массиве — DL-статусы кнопки «Тестирование» страницы
 // «Реши задачу» (restore рендерит их через _appendDlMessage страничного скрипта).
@@ -2504,8 +2599,40 @@ var DL_MSG_MARKER = '[[DL]]';
 var _restoringPersistedMessages = false;
 
 function aiMessagesKey() {
-    var path = (location.pathname || '/').replace(/\/+$/, '') || '/';
+    // Одна лента на пользователя для всех трёх клиентских страниц.
+    return AI_MSGS_KEY_PREFIX + client_id;
+}
+
+function _legacyMessagesKey(path) {
     return AI_MSGS_KEY_PREFIX + client_id + ':' + path;
+}
+
+// Однократная миграция старых per-page переписок в общую ленту. Если общий
+// ключ уже существует — старые только удаляем, чтобы не задвоить историю.
+function _migrateLegacyMessages() {
+    var sharedKey = aiMessagesKey();
+    var hasShared = false;
+    try {
+        hasShared = localStorage.getItem(sharedKey) !== null;
+    } catch (e) {
+        return; // приватный режим / квота — миграция невозможна
+    }
+    var merged = [];
+    for (var i = 0; i < AI_MSGS_LEGACY_PATHS.length; i++) {
+        var key = _legacyMessagesKey(AI_MSGS_LEGACY_PATHS[i]);
+        var raw = null;
+        try { raw = localStorage.getItem(key); } catch (e) { raw = null; }
+        if (!hasShared && raw) {
+            try {
+                var arr = JSON.parse(raw);
+                if (Array.isArray(arr)) merged = merged.concat(arr);
+            } catch (e) { /* битый старый ключ — пропускаем */ }
+        }
+        try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
+    }
+    if (!hasShared && merged.length) {
+        savePersistedMessages(merged);
+    }
 }
 
 function loadPersistedMessages() {
@@ -2617,8 +2744,17 @@ function clearPersistedMessages() {
 // через тот же onmessage-обработчик, что и при живом приёме — весь страничный
 // рендер (accordion, think-блоки, markdown) переиспользуется без дублей логики.
 // Вызывается из window.onload каждой страницы сразу после initWebSocket().
+// [[DL]]-запись умеет рендерить только страница «Реши задачу»
+// (_appendDlMessage из decide_task.js). В общей ленте такие записи попадают
+// и на чат/«В чём ошибка» — там их пропускаем, иначе маркер виден текстом.
+function _canRenderPersistedEntry(raw) {
+    if (String(raw || '').lastIndexOf(DL_MSG_MARKER, 0) !== 0) return true;
+    return typeof _appendDlMessage === 'function';
+}
+
 function restorePersistedMessages() {
     try {
+        _migrateLegacyMessages();
         if (!ws || typeof ws.onmessage !== 'function') return;
         var arr = loadPersistedMessages();
         if (!arr.length) return;
@@ -2627,6 +2763,7 @@ function restorePersistedMessages() {
         _restoringPersistedMessages = true;
         try {
             for (var i = 0; i < arr.length; i++) {
+                if (!_canRenderPersistedEntry(arr[i])) continue;
                 ws.onmessage({ data: arr[i] });
             }
         } finally {

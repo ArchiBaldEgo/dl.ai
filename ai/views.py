@@ -54,22 +54,36 @@ from .auth_backends import (
 from .admin.permissions import (
     add_user_to_builtin_ai_group,
     can_access_admin,
+    can_access_prompt_developer_docs,
     is_prompt_developer_user,
     is_superuser_user,
 )
 from .middleware import _dev_bypass_enabled
 from .services.auth import ai_disabled_reason, can_use_ai, get_user_identity_for_log
-from .services.docs import DocUnavailableError, read_chapter_markdown, render_chapter_html
+from .services.docs import (
+    CLIENT_HELP_SLUGS,
+    DocUnavailableError,
+    chapter_title,
+    read_chapter_markdown,
+    render_chapter_html,
+)
 from .services.user_models import (
     PROVIDER_BASE_URLS,
     admin_user_model_rows,
     delete_user_model,
+    public_user_model_options,
     save_user_model,
     set_user_model_access,
     user_model_options_page,
     user_model_rows,
 )
 from .services.user_directory import search_users_for_sharing
+from .services.pdf_upload import (
+    PdfValidationError,
+    max_size_mb as pdf_max_size_mb,
+    pdf_supports_vision,
+    validate_pdf_upload,
+)
 from .services.onboarding import (
     MARK_URL_USER,
     record_wizard_seen,
@@ -383,7 +397,31 @@ def _ai_disabled_reason(request):
     return ai_disabled_reason(request)
 
 
-def _render_ai_page(request, template_name, extra_context=None, wizard_scope=None):
+def _user_wizard_payload(request, scope):
+    """Конфиг онбординг-тура клиентской страницы (ai/services/onboarding.py).
+
+    Решение «показывать ли» принимает сервис по флагу в БД; шаблон рендерит
+    конфиг через json_script, ai-wizard.js читает его с DOM. Роль нужна движку
+    для ролевых шагов (prompt_dev/staff/super видят шаг про админ-панель),
+    basics_seen — были ли уже показаны «общие» шаги в туре другой страницы.
+    """
+    user = request.user
+    if getattr(user, "is_superuser", False):
+        role = "super"
+    elif getattr(user, "is_staff", False):
+        role = "staff"
+    elif is_prompt_developer_user(user):
+        role = "prompt_dev"
+    else:
+        role = ""
+    return wizard_boot_payload(
+        user, scope, mark_url=MARK_URL_USER,
+        role=role, basics_seen=user_basics_seen(user, scope),
+    )
+
+
+def _render_ai_page(request, template_name, extra_context=None,
+                    wizard_scope=None, active_page=""):
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
     Проверяет доступ, загружает список доступных моделей (с self-heal при пустом
@@ -395,6 +433,10 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
     wizard_scope — scope онбординг-wizard для этой страницы (ai/services/
     onboarding.py); с ним в контекст попадает конфиг тур-подсказок
     (ai_wizard → json_script в base_chat.html).
+
+    active_page — какой пункт #selectType подсветить в общей верхней панели
+    (ai/_top_panel.html): "chat"/"solve"/"find_error". Пусто — ни один
+    (например, «Мои AI-модели»).
     """
     if not _has_page_access(request):
         return _deny_access(request, as_json=False)
@@ -500,28 +542,13 @@ def _render_ai_page(request, template_name, extra_context=None, wizard_scope=Non
         # Кнопка «Админ-Панель» в верхней панели — только тем, кому админка
         # реально доступна (super/staff/page.admin: «Разработчик промптов»+).
         'can_access_admin': can_access_admin(request.user),
+        'active_page': active_page,
+        # Лимит PDF — один источник (ai/services/pdf_upload.py) для сервера
+        # и клиентской предпроверки размера.
+        'pdf_max_size_mb': pdf_max_size_mb(),
     }
     if wizard_scope:
-        # Онбординг-wizard этой страницы: решение «показывать ли» принимает
-        # сервис по флагу в БД (ai/services/onboarding.py), шаблон рендерит его
-        # через json_script — ai-wizard.js конфиг читает с DOM. Роль отдаётся
-        # движку для ролевых шагов (prompt_dev/staff/super видят шаг про
-        # админ-панель), basics_seen — были ли уже показаны «общие» шаги в туре
-        # другой страницы (режут они только common-шаги solve/find_error; чат
-        # всегда полный).
-        user = request.user
-        if getattr(user, "is_superuser", False):
-            role = "super"
-        elif getattr(user, "is_staff", False):
-            role = "staff"
-        elif is_prompt_developer_user(user):
-            role = "prompt_dev"
-        else:
-            role = ""
-        context["ai_wizard"] = wizard_boot_payload(
-            user, wizard_scope, mark_url=MARK_URL_USER,
-            role=role, basics_seen=user_basics_seen(user, wizard_scope),
-        )
+        context["ai_wizard"] = _user_wizard_payload(request, wizard_scope)
     if extra_context:
         context.update(extra_context)
     response = render(request, template_name, context)
@@ -670,6 +697,7 @@ def chat_view(request):
         'ai/chat.html',
         extra_context={"node_id": request.GET.get("nid", "")},
         wizard_scope="chat",
+        active_page="chat",
     )
 
 
@@ -682,6 +710,7 @@ def decide_task_view(request):
             "node_id": request.GET.get("nid", ""),
         },
         wizard_scope="solve",
+        active_page="solve",
     )
 
 
@@ -697,6 +726,7 @@ def find_error_view(request):
         'ai/find-error.html',
         extra_context={"node_id": request.GET.get("nid", "")},
         wizard_scope="find_error",
+        active_page="find_error",
     )
 
 
@@ -747,6 +777,14 @@ def my_models_view(request):
             # Все языки панели — для переключения языка на клиенте
             # (JS-апплаер перерисовывает подписи при смене #selectLang).
             "um_i18n": user_models_strings_all(),
+            # Общая верхняя панель: режим не подсвечен (это не чат/реши/ошибка),
+            # но шапка та же — и свой онбординг-тур по панели личных моделей.
+            "active_page": "",
+            "ai_wizard": _user_wizard_payload(request, "my_models"),
+            # Поля шапки, которые раньше передавали только страницы чата:
+            # выбранный язык и дата последнего обновления.
+            "saved_lang": ui_lang,
+            "last_update_date": _get_last_update_date(),
         },
     )
 
@@ -1550,48 +1588,128 @@ def transcribe_audio(request):
         return JsonResponse({'success': False, 'error': str(e)})
 
 
+@require_http_methods(["POST"])
+def upload_pdf_view(request):
+    """Загрузка PDF в чат: строгая проверка + извлечение только текста.
+
+    Доступно любому пользователю страниц чата (_has_page_access, как у страниц),
+    НО только для модели со зрением: ключ модели приходит в POST ``model`` и
+    перепроверяется на сервере (реестр/личная модель). Извлечённый текст уходит
+    в браузер и затем в WS-payload; сам файл не сохраняется.
+    """
+    if not _has_page_access(request):
+        return _deny_access(request, as_json=True)
+    if not _is_ai_app_enabled():
+        return JsonResponse({"ok": False, "code": "pdf_bad"}, status=404)
+    model_key = str(request.POST.get("model") or "").strip()
+    if not pdf_supports_vision(model_key, request.user):
+        return JsonResponse(
+            {"ok": False, "code": "pdf_requires_vision"}, status=403,
+        )
+    try:
+        info = validate_pdf_upload(request.FILES.get("file"))
+    except PdfValidationError as exc:
+        return JsonResponse({"ok": False, "code": exc.code}, status=400)
+    return JsonResponse({"ok": True, **info})
+
+
+def _client_doc_slugs(user) -> list[str]:
+    """Главы, доступные в клиентской модалке «?» этому пользователю.
+
+    «user» — всем авторизованным; гид по написанию препромпта
+    «В чём ошибка» — тем же, кому открыта промпт-документация в админке
+    (staff/суперюзер или ключ docs.prompt_developer).
+    """
+    slugs = ["user"]
+    if can_access_prompt_developer_docs(user):
+        slugs.extend(slug for slug in CLIENT_HELP_SLUGS if slug != "user")
+    return slugs
+
+
+def _client_doc_slug(request) -> str:
+    """Запрошенная глава модалки; по умолчанию — инструкция пользователя."""
+    return (request.GET.get("chapter") or "user").strip() or "user"
+
+
+def _client_doc_lang(slug: str, requested_lang: str) -> str:
+    """Язык главы: инструкция пользователя переводится, техдоки — по-русски.
+
+    Технические главы (гид по препромпту) в админке тоже не переводятся —
+    держим одинаковое поведение и не тратим перевод на большой текст.
+    """
+    return requested_lang if slug == "user" else "ru"
+
+
 @require_http_methods(["GET"])
 def chat_user_docs_view(request):
-    """Инструкция пользователя для модалки «?» в шапке чата.
+    """Документация для модалки «?» в шапке клиентских страниц.
 
-    Рендер главы «Инструкция для пользователя» (DOCX.md) в HTML
-    (ai/services/docs.py). Гейт как у страниц чата (_has_page_access → 403):
-    доступна любому аутентифицированному DL-пользователю, роль не нужна.
+    По умолчанию — глава «Инструкция для пользователя» (DOCX.md); для
+    пользователей с промпт-документацией доступна вкладка «Разработчику
+    препромпта „В чём ошибка“» (docs/find_error_prompt.md). Гейт как у
+    страниц чата (_has_page_access → 403); выбор главы — ?chapter=slug,
+    неизвестная/запрещённая глава → 403 JSON.
 
     ?lang= — язык интерфейса (значение атрибута language селекта #selectLang,
-    напр. "Russian"/"English"/"French"); глава переводится (en/fr, Google),
-    ответ несёт lang и fingerprint (mtime, size) для поллинга изменений.
+    напр. "Russian"/"English"/"French"); инструкция пользователя переводится
+    (en/fr, Google), техдоки остаются русскими. Ответ несёт chapter, список
+    доступных вкладок chapters, lang и fingerprint (mtime, size) для поллинга.
     """
     if not _has_page_access(request):
         return JsonResponse(
             {'success': False, 'error': _access_denied_reason(request)}, status=403,
         )
-    lang = get_ui_language_suffix(request.GET.get('lang', ''))
+    slug = _client_doc_slug(request)
+    slugs = _client_doc_slugs(request.user)
+    if slug not in slugs:
+        return JsonResponse(
+            {'success': False, 'error': 'Глава документации недоступна'}, status=403,
+        )
+    requested_lang = get_ui_language_suffix(request.GET.get('lang', ''))
+    lang = _client_doc_lang(slug, requested_lang)
     try:
-        rendered = render_chapter_html("user", lang=lang)
+        rendered = render_chapter_html(slug, lang=lang)
     except DocUnavailableError as exc:
         return JsonResponse({'success': False, 'error': str(exc)}, status=404)
     return JsonResponse({
         'success': True,
+        'chapter': slug,
         'title': rendered['title'],
         'html': rendered['html'],
         'lang': rendered['lang'],
         'translated': rendered.get('translated', True),
         'fingerprint': rendered['fingerprint'],
-        'download_url': f'/ai/docs/download/?lang={lang}',
+        # Вкладки — заголовки на языке интерфейса (у «user» он переводится,
+        # у техдоков всегда русский).
+        'chapters': [
+            {
+                'slug': item,
+                'title': chapter_title(
+                    item, requested_lang if item == 'user' else 'ru'
+                ),
+            }
+            for item in slugs
+        ],
+        'download_url': f'/ai/docs/download/?chapter={slug}&lang={lang}',
     })
 
 
 @require_http_methods(["GET"])
 def chat_user_docs_download_view(request):
-    """Скачивание инструкции пользователя как .md-файла (с учётом ?lang=)."""
+    """Скачивание главы модалки «?» как .md-файла (?chapter= + ?lang=)."""
     if not _has_page_access(request):
         return JsonResponse(
             {'success': False, 'error': _access_denied_reason(request)}, status=403,
         )
-    lang = get_ui_language_suffix(request.GET.get('lang', ''))
+    slug = _client_doc_slug(request)
+    if slug not in _client_doc_slugs(request.user):
+        return JsonResponse(
+            {'success': False, 'error': 'Глава документации недоступна'}, status=403,
+        )
+    requested_lang = get_ui_language_suffix(request.GET.get('lang', ''))
+    lang = _client_doc_lang(slug, requested_lang)
     try:
-        data = read_chapter_markdown("user", lang=lang)
+        data = read_chapter_markdown(slug, lang=lang)
     except DocUnavailableError as exc:
         return JsonResponse({'success': False, 'error': str(exc)}, status=404)
     from urllib.parse import quote

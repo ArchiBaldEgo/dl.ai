@@ -36,7 +36,9 @@ from django.urls import resolve
 from django.urls.exceptions import Resolver404
 from django.views.decorators.http import require_GET, require_POST
 
+from ..constants import BUILTIN_GROUP_DEVELOPER
 from ..models import AIAccessGroup, AIAdminGroupPermission
+from ..services.task_developers import clear_auto_grant
 from .permissions import BASELINE_ACCESS_KEYS, can_edit_access_groups
 from .site import ai_admin_site
 
@@ -405,6 +407,11 @@ def admin_access_group_member_toggle_view(request, group_id):
         group.users.remove(user)
     else:
         group.users.add(user)
+    if group.name == BUILTIN_GROUP_DEVELOPER:
+        # Ручное управление «Разработчиком» отменяет авто-роль тасков:
+        # маркер удаляется, чтобы закрытие тасков больше не снимало
+        # членство, выданное человеком через эту страницу.
+        clear_auto_grant(user)
     return JsonResponse({"ok": True})
 
 

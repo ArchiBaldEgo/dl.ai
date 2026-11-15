@@ -6,13 +6,26 @@
     {% endif %}
 {% endblock %}
 
-{% block chat_selected %}selected{% endblock %}
-
 {% block form_content %}
     <textarea type="text" id="messageText"
         data-node-id="{{ node_id }}"
         placeholder="{{ t.placeholder }}"
         autocomplete="off"></textarea>
+{% endblock %}
+
+{% comment %}PDF в чате: строго один PDF, только для моделей со зрением.
+Текст извлекает сервер (/ai/api/pdf/), в модель уходит только он; файл в
+браузере не сохраняется. Видимость кнопки включает JS по data-vision
+выбранной модели (гейт на сервере — consumers.py).{% endcomment %}
+{% block attach_control %}
+<div class="pdf-attach" id="pdfAttach" data-max-mb="{{ pdf_max_size_mb }}" hidden>
+    <input type="file" id="pdfFileInput" accept="application/pdf,.pdf" hidden>
+    <button type="button" id="pdfAttachBtn" class="pdf-attach-btn"
+        title="{{ t.pdfAttachTitle }}" aria-label="{{ t.pdfAttachTitle }}">📎 {{ t.pdfAttach }}</button>
+    <span class="pdf-attach-status" id="pdfAttachStatus" role="status" aria-live="polite"></span>
+    <button type="button" id="pdfClearBtn" class="pdf-attach-clear" hidden
+        title="{{ t.pdfRemove }}" aria-label="{{ t.pdfRemove }}">✕</button>
+</div>
 {% endblock %}
 
 {% block extra_body_script %}{% endblock %}

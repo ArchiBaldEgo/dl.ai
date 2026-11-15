@@ -47,3 +47,4 @@ zope.interface==7.2
 imageio-ffmpeg
 deep-translator==1.11.4
 markdown==3.7
+pypdf==6.19.0

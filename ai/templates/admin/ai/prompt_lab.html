@@ -1,0 +1,190 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/prompt_lab/index.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="lab-wrap" id="promptLab"
+     data-start-url="{{ start_url }}"
+     data-status-url="{{ status_url }}"
+     data-cancel-url="{{ cancel_url }}"
+     data-body-url="{{ body_url }}"
+     data-export-url="{{ export_url }}">
+  {% include "admin/ai/_ai_back_nav.html" %}
+
+  <p class="lab-intro">
+    Прогон препромпта «В чём ошибка?» на базе ошибочных программ. Сообщение
+    собирается ровно так же, как у студента; метрики считаются по служебной
+    строке <code>КОДЫ:</code>. Это <strong>не</strong> «Отладка промтов»:
+    та правит промпт по провалам DL, эта — измеряет качество.
+  </p>
+
+  <div class="lab-card">
+    <h2>Запуск</h2>
+    <div class="lab-grid">
+      <label class="lab-field">
+        <span>Промпт</span>
+        <select id="labPrompt">
+          {% for option in prompt_options %}
+            <option value="{{ option.id }}">{{ option.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="lab-field">
+        <span>Язык интерфейса</span>
+        <select id="labUiLanguage">
+          <option value="ru">Русский</option>
+          <option value="en">English</option>
+          <option value="fr">Français</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="lab-field">
+      <span>Модели</span>
+      <div class="lab-models">
+        {% for model in model_options %}
+          <label class="lab-check">
+            <input type="checkbox" class="lab-model" value="{{ model.key }}">
+            <span>{{ model.title }}</span>
+            {% if model.availability_note %}<em>({{ model.availability_note }})</em>{% endif %}
+          </label>
+        {% empty %}
+          <span class="lab-muted">Нет моделей, допущенных к прогонам.</span>
+        {% endfor %}
+      </div>
+    </div>
+
+    <label class="lab-check">
+      <input type="checkbox" id="labEvalSuffix" checked>
+      <span>Добавлять служебную строку <code>КОДЫ:</code> (без неё метрики не считаются)</span>
+    </label>
+  </div>
+
+  <div class="lab-card">
+    <h2>Кейсы <span class="lab-counter" id="labCaseCounter"></span></h2>
+    <div class="lab-filters">
+      <label class="lab-field">
+        <span>Группа</span>
+        <select id="labFilterGroup">
+          <option value="">Все группы</option>
+          {% for group in groups %}
+            <option value="{{ group.pk }}">{{ group.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="lab-field">
+        <span>Статус</span>
+        <select id="labFilterStatus">
+          <option value="">Любой</option>
+          {% for value, label in status_choices %}
+            <option value="{{ value }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="lab-field">
+        <span>Поиск</span>
+        <input type="search" id="labFilterSearch" placeholder="Имя, группа, код…">
+      </label>
+      <label class="lab-check lab-filter-check">
+        <input type="checkbox" id="labFilterStatement">
+        <span>Только с условием задачи</span>
+      </label>
+    </div>
+    <div class="lab-case-actions">
+      <button type="button" id="labSelectVisible">Выбрать видимые</button>
+      <button type="button" id="labClearSelection">Снять выбор</button>
+      <span class="lab-muted">Лимит: {{ max_cases }} кейсов за прогон.</span>
+    </div>
+    <div class="lab-cases" id="labCases"></div>
+    <div class="lab-warning" id="labCostWarning" hidden></div>
+    <button type="button" id="labStartBtn" class="default">Запустить прогон</button>
+    <div class="lab-message" id="labStartMessage"></div>
+    <div class="lab-links">
+      <a href="{{ cases_admin_url }}">Открыть базу ошибочных программ</a>
+    </div>
+  </div>
+
+  <div class="lab-card">
+    <h2>Процессы</h2>
+    <table class="lab-table" id="labRecentRuns">
+      <thead>
+        <tr><th>Начат</th><th>Промпт</th><th>Модели</th><th>Кейсов</th><th>Статус</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for run in recent_runs %}
+          <tr data-run-id="{{ run.run_id }}">
+            <td>{{ run.started_at }}</td>
+            <td>{{ run.prompt_name }}</td>
+            <td>{{ run.model_titles|join:", " }}</td>
+            <td>{{ run.case_count }}</td>
+            <td><span class="lab-badge lab-status-{{ run.status }}">{{ run.status }}</span></td>
+            <td><button type="button" class="lab-show-run" data-run-id="{{ run.run_id }}">Показать</button></td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6" class="lab-muted">Прогонов ещё нет.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="lab-card" id="labRunPanel" hidden>
+    <div class="lab-run-head">
+      <div>
+        <h2>Прогон <span id="labRunId"></span></h2>
+        <div class="lab-muted" id="labRunMeta"></div>
+      </div>
+      <div class="lab-run-actions">
+        <a id="labExportLink" class="button" href="#">Экспорт CSV</a>
+        <button type="button" id="labCancelBtn" class="lab-danger">Прервать</button>
+      </div>
+    </div>
+    <div class="lab-progress" id="labProgress" hidden>
+      <div class="lab-progress-bar"><div class="lab-progress-fill" id="labProgressFill"></div></div>
+      <span id="labProgressText"></span>
+    </div>
+    <div class="lab-message" id="labRunMessage"></div>
+
+    <h3>Сводка по моделям</h3>
+    <table class="lab-table" id="labSummary">
+      <thead>
+        <tr>
+          <th>Модель</th><th>Кейсов</th><th>Ошибок</th><th>Точных</th>
+          <th>Exact rate</th><th>Precision</th><th>Recall</th><th>F1</th>
+          <th>Ср. время</th><th>Токены</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h3>Сетка «кейс × модель»</h3>
+    <label class="lab-check">
+      <input type="checkbox" id="labOnlyProblems">
+      <span>Только проблемные (не exact / ошибка)</span>
+    </label>
+    <table class="lab-table lab-grid-table" id="labResults">
+      <thead>
+        <tr>
+          <th>Кейс</th><th>Модель</th><th>Ожидалось</th><th>Найдено</th>
+          <th>Совпало</th><th>Пропущено</th><th>Лишние</th>
+          <th>Exact</th><th>P</th><th>R</th><th>F1</th><th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="lab-detail" id="labDetail" hidden>
+      <div class="lab-detail-head">
+        <strong id="labDetailTitle"></strong>
+        <button type="button" id="labDetailClose">Закрыть</button>
+      </div>
+      <div id="labDetailBody"></div>
+    </div>
+  </div>
+</div>
+
+{{ cases_payload|json_script:"prompt-lab-cases" }}
+<script src="{% static 'admin/ai/prompt_lab/index.js' %}"></script>
+{% endblock %}

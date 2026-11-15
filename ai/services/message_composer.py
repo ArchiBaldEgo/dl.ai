@@ -17,18 +17,27 @@ class ChatModeBuilder(ModeMessageBuilder):
     async def build(self, data: dict, resolver: PromptResolver) -> str:
         from ..models import AIRequestLog
 
+        # PDF приходит уже извлечённым ТЕКСТОМ (ai/services/pdf_upload.py);
+        # блок добавляется к сообщению в фиксированном порядке: текст
+        # пользователя → содержимое PDF → препромпт.
+        from .pdf_upload import build_pdf_block
+
         self.mode = AIRequestLog.MODE_CHAT
-        message = data.get("message", "")
+        message = str(data.get("message") or "")
         language = data.get("language", "Russian")
         preprompt = data.get("preprompt", "")
         topic_name = data.get("topic_name", "")
 
+        parts = [message] if message else []
+        pdf_block = build_pdf_block(data.get("pdf"), language)
+        if pdf_block:
+            parts.append(pdf_block)
         if preprompt:
             prompt_text = await resolver.resolve_text(preprompt, language, "", topic_name)
             if prompt_text:
                 prefix = "Preprompt" if language not in ("Русский", "Russian") else "Промпт"
-                return f"{message}\n\n{prefix}: {prompt_text}"
-        return message
+                parts.append(f"{prefix}: {prompt_text}")
+        return "\n\n".join(parts)
 
 
 class SolveModeBuilder(ModeMessageBuilder):

@@ -428,6 +428,20 @@ def can_access_prompt_developer_docs(user):
     return user_has_key(user, "docs.prompt_developer")
 
 
+def can_access_prompt_lab(request):
+    """«Лаборатория промптов»: staff/superuser ИЛИ ключ page.prompt_lab.
+
+    Ключ выдан встроенным группам «Разработчик промптов» и «Разработчик»
+    миграцией 0081: лаборатория тратит токены, поэтому не входит в baseline.
+    Тем же ключом открывается база ошибочных программ (FindErrorCase*).
+    """
+    if not request.user.is_authenticated:
+        return False
+    return is_staff_or_superuser(request.user) or user_has_key(
+        request.user, "page.prompt_lab"
+    )
+
+
 def can_access_test_data(request):
     """«Тестовые данные»: суперюзер ИЛИ ключ page.test_data.
 

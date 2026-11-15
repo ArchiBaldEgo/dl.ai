@@ -35,7 +35,11 @@ function buildConfig(site) {
         queueWaitMs: toInt(env('queueWaitMs'), d.queueWaitMs),
         // worker defaults
         serviceModel: env('serviceModel') || d.serviceModel,
-        headless: toBool(env('headless'), false),
+        // Прод всегда headless: без X-сервера headed-Chrome падает
+        // («Missing X server or $DISPLAY») и пул остаётся без ботов.
+        // Видимый Chrome нужен только для ручного seed-логина — там
+        // headless выключается явно (HEADLESS=false / KIMI_HEADLESS=false).
+        headless: toBool(env('headless'), true),
         chromePath: env('chromePath') || '',
         viewport: {
             width: toInt(env('viewportW'), 800),

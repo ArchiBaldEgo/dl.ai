@@ -7,12 +7,16 @@ ExternalAuthMiddleware: проверяет DLSID-куку, обращается 
 CsrfSessionFallbackMiddleware: восстанавливает CSRF-токен из сессии при отсутствии куки.
 """
 
+import hashlib
 import os
+import threading
 import time
 from urllib.parse import unquote
 
 from django.conf import settings
 from django.contrib.auth import login
+from django.core.cache import cache
+from django.db import close_old_connections
 from django.http import JsonResponse, HttpResponseRedirect
 from django.middleware import csrf
 from .external_account import get_or_create_user_from_external
@@ -134,11 +138,20 @@ class ExternalAuthMiddleware:
         self.provision_external_key = "ai_provisioned_external_id"
         self.provision_user_key = "ai_provisioned_user_pk"
         # How long a cached user_info is trusted without revalidating the DLSID
-        # against dl.gsu.by (seconds). Default 60s; 0 = always revalidate.
+        # against dl.gsu.by (seconds). Default 60s; 0 = revalidate on every
+        # request. Revalidation happens in the background (stale-while-
+        # revalidate), so the request itself never waits for dl.gsu.by while a
+        # cached identity exists.
         try:
             self.auth_cache_ttl = int(os.getenv("AI_AUTH_CACHE_TTL", "60"))
         except (TypeError, ValueError):
             self.auth_cache_ttl = 60
+        # How long the last confirmed user_info is kept as a stale fallback
+        # (Django cache). Survives session loss and dl.gsu.by downtime.
+        try:
+            self.auth_stale_ttl = int(os.getenv("AI_AUTH_STALE_TTL", "86400"))
+        except (TypeError, ValueError):
+            self.auth_stale_ttl = 86400
         logger.info(f"Middleware init: skip_paths={self.skip_paths}")
 
     def _build_skip_paths(self, raw_paths: str) -> list[str]:
@@ -208,13 +221,159 @@ class ExternalAuthMiddleware:
         except (TypeError, ValueError):
             return 0.0
 
-    def _store_cached_user_info(self, request, session_id: str, user_info: dict) -> None:
+    def _store_cached_user_info(
+        self, request, session_id: str, user_info: dict, fetched_at: float | None = None
+    ) -> None:
         if not hasattr(request, "session"):
             return
+        stamp = time.time() if fetched_at is None else float(fetched_at)
+        changed = (
+            request.session.get(self.cache_session_key) != session_id
+            or request.session.get(self.cache_user_key) != user_info
+            or request.session.get(self.cache_fetched_at_key) != stamp
+        )
         request.session[self.cache_session_key] = session_id
         request.session[self.cache_user_key] = user_info
-        request.session[self.cache_fetched_at_key] = time.time()
-        request.session.modified = True
+        request.session[self.cache_fetched_at_key] = stamp
+        if changed:
+            request.session.modified = True
+
+    # ── Stale-while-revalidate (Django cache) ───────────────────────────────
+    # DLSID в ключах не хранится: только sha256. Значение — последний
+    # подтверждённый user_info + timestamp; сессия остаётся быстрым L1-кэшем,
+    # Django cache — L2, переживающий потерю/рестарт сессии.
+    def _cache_digest(self, session_id: str) -> str:
+        return hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()
+
+    def _user_cache_key(self, session_id: str) -> str:
+        return f"ai_auth_user:{self._cache_digest(session_id)}"
+
+    def _refresh_lock_key(self, session_id: str) -> str:
+        return f"ai_auth_refresh:{self._cache_digest(session_id)}"
+
+    def _invalid_cache_key(self, session_id: str) -> str:
+        return f"ai_auth_invalid:{self._cache_digest(session_id)}"
+
+    def _cache_external_user_info(
+        self, session_id: str, user_info: dict, fetched_at: float | None = None
+    ) -> None:
+        try:
+            cache.set(
+                self._user_cache_key(session_id),
+                {
+                    "user_info": user_info,
+                    "fetched_at": time.time() if fetched_at is None else float(fetched_at),
+                },
+                timeout=self.auth_stale_ttl,
+            )
+        except Exception:  # Redis/LocMem сбой не должен ломать запрос
+            logger.warning("Failed to store external user_info in Django cache", exc_info=True)
+
+    def _load_external_user_info(self, session_id: str) -> tuple[dict | None, float]:
+        try:
+            payload = cache.get(self._user_cache_key(session_id))
+        except Exception:
+            logger.warning("Failed to read external user_info from Django cache", exc_info=True)
+            return None, 0.0
+        if not isinstance(payload, dict):
+            return None, 0.0
+        user_info = payload.get("user_info")
+        if not isinstance(user_info, dict) or not user_info:
+            return None, 0.0
+        try:
+            fetched_at = float(payload.get("fetched_at") or 0)
+        except (TypeError, ValueError):
+            fetched_at = 0.0
+        return user_info, fetched_at
+
+    def _read_cached_user_info(
+        self, request, session_id: str
+    ) -> tuple[dict | None, float]:
+        """Лучший доступный кэш: сессия (L1) или Django cache (L2), кто свежее."""
+        session_info = self._get_cached_user_info(request, session_id)
+        session_at = self._cached_fetched_at(request) if session_info else 0.0
+        cached_info, cached_at = self._load_external_user_info(session_id)
+        if cached_info and (not session_info or cached_at > session_at):
+            # Фоновое обновление успело раньше — подтянуть его в сессию
+            # (её читает WS-consumer).
+            self._store_cached_user_info(
+                request, session_id, cached_info, fetched_at=cached_at
+            )
+            return cached_info, cached_at
+        return session_info, session_at
+
+    def _is_marked_invalid(self, session_id: str) -> bool:
+        try:
+            return bool(cache.get(self._invalid_cache_key(session_id)))
+        except Exception:
+            return False
+
+    def _schedule_user_info_refresh(self, session_id: str) -> None:
+        """Запустить фоновую ревалидацию DLSID, не блокируя запрос.
+
+        Один refresh на DLSID: lock в Django cache не даёт толпе запросов
+        (страница + параллельные API/ассеты) одновременно дёргать dl.gsu.by.
+        """
+        if not session_id:
+            return
+        lock_key = self._refresh_lock_key(session_id)
+        try:
+            if not cache.add(lock_key, 1, timeout=60):
+                return
+            thread = threading.Thread(
+                target=self._refresh_user_info,
+                args=(session_id, lock_key),
+                name="ai-auth-refresh",
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            logger.warning("Failed to schedule external auth refresh", exc_info=True)
+            try:
+                cache.delete(lock_key)
+            except Exception:
+                pass
+
+    def _refresh_user_info(self, session_id: str, lock_key: str) -> None:
+        """Фоновая ревалидация: обновляет L2-кэш, сессию — на следующем запросе."""
+        try:
+            user_info = fetch_external_user_info(session_id, api_url=self.api_url)
+            if isinstance(user_info, dict) and user_info:
+                self._cache_external_user_info(session_id, user_info)
+                try:
+                    cache.delete(self._invalid_cache_key(session_id))
+                except Exception:
+                    pass
+                logger.debug(
+                    "External user_info refreshed in background (userId=%s)",
+                    user_info.get("userId"),
+                )
+        except ExternalAuthUnauthorized:
+            # Не логиним/редиректим из фонового потока: ставим tombstone,
+            # следующий HTTP-запрос пойдёт блокирующим путём и обработает 401.
+            try:
+                cache.set(
+                    self._invalid_cache_key(session_id),
+                    1,
+                    timeout=max(self.auth_cache_ttl, 60),
+                )
+            except Exception:
+                pass
+        except ExternalAuthUnavailable:
+            logger.warning("Background DLSID revalidation failed: dl.gsu.by unavailable")
+        except ExternalAuthMisconfigured as exc:
+            logger.error(f"Background DLSID revalidation misconfigured: {exc}")
+        except Exception:
+            logger.exception("Background DLSID revalidation failed")
+        finally:
+            try:
+                cache.delete(lock_key)
+            except Exception:
+                pass
+            try:
+                close_old_connections()
+            except Exception:
+                pass
 
     def _redirect_or_optional(self, request, request_path: str):
         """Return the response when the request is unauthenticated.
@@ -335,21 +494,49 @@ class ExternalAuthMiddleware:
         logger.debug("Session ID decoded")
 
         try:
-            cached_user_info = self._get_cached_user_info(request, session_id)
-            fetched_at = self._cached_fetched_at(request)
-            if cached_user_info and (time.time() - fetched_at) < self.auth_cache_ttl:
-                # Свежий кэш (< TTL) — используем без повторной проверки DLSID.
+            # Tombstone после фонового 401: кэш не доверяем, идём блокирующим
+            # путём — он сделает logout/redirect (или подтвердит, что DLSID снова
+            # валиден, и снимет tombstone).
+            marked_invalid = self._is_marked_invalid(session_id)
+            cached_user_info = None
+            fetched_at = 0.0
+            if not marked_invalid:
+                cached_user_info, fetched_at = self._read_cached_user_info(
+                    request, session_id
+                )
+            if cached_user_info:
+                # Stale-while-revalidate: отдаём кэш СРАЗУ; если он старше TTL —
+                # обновляем DLSID в фоне, не задерживая рендер страницы.
                 user_info = cached_user_info
+                if self.auth_cache_ttl <= 0 or (
+                    time.time() - fetched_at
+                ) >= self.auth_cache_ttl:
+                    self._schedule_user_info_refresh(session_id)
             else:
-                # Кэша нет либо он протух (> TTL) — ревалидируем DLSID через внешний API.
+                # Кэша нет (или он помечен невалидным) — единственный
+                # блокирующий путь к dl.gsu.by.
                 user_info = fetch_external_user_info(session_id, api_url=self.api_url)
                 self._store_cached_user_info(request, session_id, user_info)
+                self._cache_external_user_info(session_id, user_info)
+                try:
+                    cache.delete(self._invalid_cache_key(session_id))
+                except Exception:
+                    pass
             logger.debug("External user_info fetched (userId=%s)", (user_info or {}).get("userId"))
         except ExternalAuthUnauthorized:
             # DLSID is no longer valid — drop the local session and
             # bounce the user back to dl.gsu.by so they re-authenticate.
             # Dev-bypass: не логаутим и не зацикливаемся на редиректе —
             # перелогинит fake-пользователем.
+            try:
+                cache.delete(self._user_cache_key(session_id))
+                cache.set(
+                    self._invalid_cache_key(session_id),
+                    1,
+                    timeout=max(self.auth_cache_ttl, 60),
+                )
+            except Exception:
+                pass
             if _dev_bypass_enabled():
                 return self._process_dev_bypass(request, _dev_bypass_user_info())
             from django.contrib.auth import logout as auth_logout
@@ -370,7 +557,9 @@ class ExternalAuthMiddleware:
             # dl.gsu.by недоступен — падаем на stale-кэш (graceful degradation):
             # пользуемся последним подтверждённым user_info, не закрывая доступ.
             logger.error(f"Request to external API failed: {exc}")
-            cached_user_info = self._get_cached_user_info(request, session_id)
+            cached_user_info, _cached_at = self._read_cached_user_info(
+                request, session_id
+            )
             if cached_user_info:
                 user_info = cached_user_info
             elif _dev_bypass_enabled():

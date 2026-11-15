@@ -30,6 +30,7 @@ from ai.views import (
     set_password_view,
     get_groq_limits_view,
     wizard_seen_view,
+    upload_pdf_view,
 )
 
 urlpatterns = [
@@ -49,5 +50,6 @@ urlpatterns = [
     path('ai/api/get-solution-result/', get_solution_result_view, name='get_solution_result'),
     path('ai/api/dl-test-data/', get_dl_test_data_view, name='get_dl_test_data'),
     path('ai/api/wizard-seen/', wizard_seen_view, name='ai_wizard_seen'),
+    path('ai/api/pdf/', upload_pdf_view, name='upload_pdf'),
 
 ] + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
