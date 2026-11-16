@@ -1,0 +1,296 @@
+"""Модель внешнего DL-аккаунта и утилиты для пользовательского provisioning.
+
+Связывает Django User с внешним аккаунтом dl.gsu.by через ExternalDLAccount.
+При первом входе автоматически создаёт пользователя с непаролем (unusable password),
+генерирует уникальный username на основе логина dl.gsu.by,
+зачисляет во встроенную группу доступа «Пользователи» (AIAccessGroup, без прав:
+входа в админку нет) на СОЗДАНИИ юзера и обогащает first/last name из API.
+"""
+from django.contrib.auth import get_user_model
+from django.db import IntegrityError
+from ai.db import ExternalDLAccount
+import logging
+
+logger = logging.getLogger(__name__)
+User = get_user_model()
+
+
+def _find_available_username(base_username: str) -> str:
+    """Подбирает свободный username: если base занят, добавляет _1, _2, ..."""
+    if not User.objects.filter(username=base_username).exists():
+        return base_username
+    
+    counter = 1
+    while True:
+        candidate = f"{base_username}_{counter}"
+        if not User.objects.filter(username=candidate).exists():
+            return candidate
+        counter += 1
+
+
+def _extract_external_login(user_info: dict) -> str:
+    """Извлекает логин/никнейм из ответа API dl.gsu.by по известным ключам."""
+    for key in ("login", "username", "userName", "nickname", "nick"):
+        value = (user_info.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _normalize_name(value) -> str:
+    return (value or "").strip()
+
+
+# Поля ExternalDLAccount, заполняемые из email/education ответа get-user-info.
+_STUDENT_INFO_FIELDS = (
+    "dl_email",
+    "education_form",
+    "education_school_id",
+    "education_school_kind",
+    "education_school_no",
+    "education_group_mask_id",
+    "education_form_letter",
+    "education_school_name",
+    "education_form_name",
+    "education_group_name",
+)
+
+
+def _extract_student_info(user_info: dict) -> dict[str, str]:
+    """Извлекает email и учебный блок education из ответа post/get-user-info.
+
+    Формат ответа описан в dl-rest-api.json (dl-rest-api.json): top-level
+    ``email`` и вложенный ``education`` (form, schoolId, schoolKind,
+    schoolNo, groupMaskId, formLetter) + названия (schoolName, formName,
+    groupName) — их DL отдаёт с версии 1.4.2 API. Отсутствующие ключи дают
+    пустую строку (поля модели blank). Небезопасные значения приводятся к
+    строке и обрезаются.
+    """
+    education = user_info.get("education") or {}
+    if not isinstance(education, dict):
+        education = {}
+
+    def _pick(key: str) -> str:
+        return str(education.get(key) or "").strip()
+
+    return {
+        "dl_email": str(user_info.get("email") or "").strip(),
+        "education_form": _pick("form"),
+        "education_school_id": _pick("schoolId"),
+        "education_school_kind": _pick("schoolKind"),
+        "education_school_no": _pick("schoolNo"),
+        "education_group_mask_id": _pick("groupMaskId"),
+        "education_form_letter": _pick("formLetter"),
+        "education_school_name": _pick("schoolName"),
+        "education_form_name": _pick("formName"),
+        "education_group_name": _pick("groupName"),
+    }
+
+
+def _extract_first_last_name(user_info: dict) -> tuple[str, str]:
+    """Извлекает имя и фамилию из ответа API dl.gsu.by.
+
+    Проверяет множество вариантов ключей (firstName, first_name, givenName и т.д.).
+    Если отдельные поля отсутствуют, пытается разобрать fullName / name.
+    """
+    first_name = ""
+    last_name = ""
+
+    for key in ("firstName", "first_name", "firstname", "givenName", "given_name", "givenname"):
+        first_name = _normalize_name(user_info.get(key))
+        if first_name:
+            break
+
+    for key in ("lastName", "last_name", "lastname", "surname", "familyName", "family_name", "familyname"):
+        last_name = _normalize_name(user_info.get(key))
+        if last_name:
+            break
+
+    name_value = _normalize_name(user_info.get("name"))
+    if name_value and (not first_name and not last_name):
+        parts = [part for part in name_value.split() if part]
+        if len(parts) >= 2:
+            last_name = parts[0]
+            first_name = parts[1]
+        else:
+            first_name = name_value
+
+    full_name = ""
+    for key in ("fullName", "full_name", "fullname", "fio", "FIO", "displayName", "display_name"):
+        full_name = _normalize_name(user_info.get(key))
+        if full_name:
+            break
+
+    if full_name and (not first_name or not last_name):
+        parts = [part for part in full_name.split() if part]
+        if len(parts) >= 2:
+            last_name = last_name or parts[0]
+            first_name = first_name or parts[1]
+        elif len(parts) == 1 and not first_name:
+            first_name = parts[0]
+
+    return first_name, last_name
+
+
+def get_or_create_user_from_external(user_info: dict) -> tuple[User, bool]:
+    """Создаёт или находит Django-пользователя по ответу внешнего API dl.gsu.by.
+
+    Шаги:
+    1. Извлекает userId, login, firstName, lastName из user_info.
+    2. При необходимости обогащает имена через /restapi/get-id-user-info.
+    3. Ищет существующего пользователя по ExternalDLAccount.external_user_id.
+    4. Если не найден — создаёт User + ExternalDLAccount.
+    5. Обновляет username/first_name/last_name при изменении; email и блок
+       education (учебные данные студента, dl-rest-api.json) обновляются при
+       каждом входе, если API отдал непустое значение.
+    6. Зачисляет НОВОГО пользователя во встроенную группу доступа
+       «Пользователи» (AIAccessGroup; без прав — входа в админку нет).
+       Действующим состав правит суперюзер на «Группах доступа».
+
+    Возвращает (user, created), где created=True если пользователь создан.
+    """
+    external_user_id = str(user_info.get('userId'))
+    external_login = _extract_external_login(user_info)
+    external_first_name, external_last_name = _extract_first_last_name(user_info)
+    student_info = _extract_student_info(user_info)
+    
+    # Enrich from /restapi/get-id-user-info when names are missing.
+    if external_user_id and not (external_first_name and external_last_name):
+        try:
+            from ai.dl_api_client import fetch_user_names
+            names = fetch_user_names(external_user_id)
+            if not external_first_name and names.get("first_name"):
+                external_first_name = names["first_name"]
+            if not external_last_name and names.get("last_name"):
+                external_last_name = names["last_name"]
+        except Exception as exc:
+            logger.warning("fetch_user_names failed for userId=%s: %s", external_user_id, exc)
+
+    # Названия вуза/школы и группы: get-user-info отдаёт их начиная с
+    # версии 1.4.2 API (EducationInfo.schoolName/groupName). Если блок
+    # education в ответе пуст (старый DL или кеш), дозабираем через
+    # get-id-user-info — sessionId там не нужен.
+    if external_user_id and external_user_id != "None" and not (
+        student_info.get("education_school_name") or student_info.get("education_group_name")
+    ):
+        try:
+            from ai.dl_api_client import fetch_user_education
+            education = fetch_user_education(external_user_id)
+            for dl_key, model_field in (
+                ("form", "education_form"),
+                ("schoolId", "education_school_id"),
+                ("schoolKind", "education_school_kind"),
+                ("schoolNo", "education_school_no"),
+                ("groupMaskId", "education_group_mask_id"),
+                ("formLetter", "education_form_letter"),
+                ("schoolName", "education_school_name"),
+                ("formName", "education_form_name"),
+                ("groupName", "education_group_name"),
+            ):
+                value = (education.get(dl_key) or "").strip()
+                if value and not student_info.get(model_field):
+                    student_info[model_field] = value
+        except Exception as exc:
+            logger.warning(
+                "fetch_user_education failed for userId=%s: %s", external_user_id, exc
+            )
+    
+    if not external_user_id or external_user_id == "None":
+        logger.error(f"Invalid user_info: userId={external_user_id}")
+        raise ValueError("userId is required")
+    
+    user = None
+    created = False
+    
+    # 1. Primary lookup by external userId.
+    try:
+        ext_account = ExternalDLAccount.objects.select_related('user').get(
+            external_user_id=external_user_id
+        )
+        user = ext_account.user
+        
+        # Store latest external login if API provides it.
+        updates = {}
+        if external_login and ext_account.external_login != external_login:
+            updates["external_login"] = external_login
+        if external_first_name and ext_account.external_first_name != external_first_name:
+            updates["external_first_name"] = external_first_name
+        if external_last_name and ext_account.external_last_name != external_last_name:
+            updates["external_last_name"] = external_last_name
+        # Email/education: перезаписываем только непустыми значениями из API —
+        # DL может не отдавать блок education (см. комментарий у полей модели).
+        for field in _STUDENT_INFO_FIELDS:
+            value = student_info.get(field) or ""
+            if value and getattr(ext_account, field) != value:
+                updates[field] = value
+        if updates:
+            for key, value in updates.items():
+                setattr(ext_account, key, value)
+            ext_account.save(update_fields=list(updates.keys()))
+
+        # Prefer external nickname as Django username when available.
+        if external_login and user.username != external_login:
+            candidate = external_login
+            if User.objects.filter(username=candidate).exclude(pk=user.pk).exists():
+                candidate = _find_available_username(external_login)
+            if user.username != candidate:
+                user.username = candidate
+                user.save(update_fields=['username'])
+    
+    except ExternalDLAccount.DoesNotExist:
+        # 2. Create new user with nickname if available, otherwise user_<userId>.
+        base_username = external_login or f"user_{external_user_id}"
+        username = _find_available_username(base_username)
+        try:
+            user = User.objects.create_user(
+                username=username,
+                email='',
+            )
+            user.set_unusable_password()
+            user.save()
+            created = True
+            logger.info(f"Created new user: {user.username}")
+        except IntegrityError as e:
+            logger.error(f"Failed to create user with username {username}: {e}")
+            raise
+        
+        # Link external account by external userId.
+        try:
+            ext_account, _ = ExternalDLAccount.objects.get_or_create(
+                external_user_id=external_user_id,
+                defaults={
+                    'user': user,
+                    'external_login': external_login,
+                    'external_first_name': external_first_name,
+                    'external_last_name': external_last_name,
+                    **student_info,
+                }
+            )
+        except IntegrityError as e:
+            logger.error(f"Failed to create external account for user {user.username}: {e}")
+            raise
+    
+    if user:
+        user_updates = {}
+        if external_first_name and user.first_name != external_first_name:
+            user_updates["first_name"] = external_first_name
+        if external_last_name and user.last_name != external_last_name:
+            user_updates["last_name"] = external_last_name
+        if user_updates:
+            for key, value in user_updates.items():
+                setattr(user, key, value)
+            user.save(update_fields=list(user_updates.keys()))
+
+    # Baseline новой аудитории: встроенная группа «Пользователи» (без прав,
+    # входа в админку нет). Зачисляем ТОЛЬКО вновь созданного юзера — иначе
+    # отзыв/выдача роли суперюзером откатывалась бы каждым логином.
+    # У действующих юзеров состав правит суперюзер на «Группах доступа».
+    try:
+        from ai.admin.permissions import add_user_to_builtin_ai_group
+        if created:
+            add_user_to_builtin_ai_group(user)
+    except Exception as e:
+        logger.error(f"Failed to enroll user {user.username} into «Пользователи»: {e}")
+        raise
+    
+    return user, created

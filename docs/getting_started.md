@@ -54,7 +54,7 @@ docker version
 sudo apt install -y git
 git config --global user.name "Ваше Имя Фамилия"
 git config --global user.email "ваш.email@example.com"
-git clone https://github.com/ArchiBaldEgo/dl.ai.git
+git clone https://github.com/ArchiBaldEgo/dlai.git
 cd dl.ai
 ```
 

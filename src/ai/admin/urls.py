@@ -1,0 +1,211 @@
+"""URL-маршруты кастомного AI admin site.
+
+Содержит кастомные пути для ARM (solve), статуса моделей,
+логов запросов и личных промптов.
+Стандартные admin URL подключаются через ai_admin_site.get_urls().
+"""
+
+from django.urls import include, path
+
+from ai.views import set_password_view
+from ai.admin.access_groups import (
+    admin_access_group_delete_view,
+    admin_access_group_member_search_view,
+    admin_access_group_member_toggle_view,
+    admin_access_group_save_view,
+    admin_access_groups_view,
+)
+from ai.admin.active_runs import admin_active_runs_view
+from ai.admin.arm import (
+    admin_arm_solve_view,
+    admin_arm_solve_start_view,
+    admin_arm_prompt_debug_view,
+    admin_arm_prompt_debug_start_view,
+    admin_arm_prompt_debug_skip_view,
+    admin_arm_solve_status_view,
+    admin_arm_solve_load_tree_view,
+    admin_arm_solve_task_statuses_view,
+    admin_arm_solve_refresh_task_statuses_view,
+    admin_arm_solve_cancel_view,
+    admin_arm_solve_pause_view,
+    admin_arm_solve_resume_view,
+    admin_arm_solve_rerun_pairs_view,
+    admin_arm_solve_report_xlsx_view,
+    admin_arm_solve_result_download_view,
+    admin_arm_solve_result_body_view,
+)
+from ai.admin.dl_api_requests import (
+    admin_dl_api_request_create_view,
+    admin_dl_api_request_update_view,
+    admin_dl_api_requests_view,
+)
+from ai.admin.docs import (
+    admin_docs_content_view,
+    admin_docs_download_view,
+    admin_docs_index_view,
+    admin_docs_view,
+)
+from ai.admin.guest_mode import admin_view_as_groups_view, admin_view_as_select_view
+from ai.admin.request_logs import (
+    admin_batch_snapshot_view,
+    admin_daily_report_view,
+    admin_request_log_detail_view,
+    admin_request_log_task_text_view,
+    admin_request_log_xlsx_view,
+    admin_request_logs_counters_view,
+    admin_request_logs_view,
+    resend_request_view,
+    rerun_arm_batch_view,
+)
+from ai.admin.model_status import (
+    admin_model_status_view,
+    admin_model_status_refresh_view,
+    admin_model_status_state_view,
+)
+from ai.admin.my_prompt import admin_my_prompt_view
+from ai.admin.request_logs import admin_request_log_detail_json_view
+from ai.admin.onboarding import admin_wizard_seen_view
+from ai.admin.pinned import admin_pinned_run_toggle_view, admin_pinned_runs_view
+from ai.admin.prompt_defaults import admin_prompt_defaults_view
+from ai.admin.prompt_lab import (
+    admin_prompt_lab_cancel_view,
+    admin_prompt_lab_export_view,
+    admin_prompt_lab_result_body_view,
+    admin_prompt_lab_start_view,
+    admin_prompt_lab_status_view,
+    admin_prompt_lab_view,
+)
+from ai.admin.site import ai_admin_site
+from ai.admin.tasks import (
+    admin_task_assign_view,
+    admin_task_claim_view,
+    admin_task_close_view,
+    admin_task_create_view,
+    admin_task_edit_view,
+    admin_task_reopen_view,
+    admin_task_reorder_view,
+    admin_task_user_search_view,
+    admin_tasks_view,
+)
+from ai.admin.test_console import (
+    admin_test_console_log_view,
+    admin_test_console_logs_view,
+    admin_test_console_view,
+    admin_test_console_start_view,
+    admin_test_console_status_view,
+)
+from ai.admin.test_data import (
+    test_data_emit_request_view,
+    test_data_view
+)
+from ai.admin.tokens import admin_token_usage_view
+from ai.admin.updates import admin_updates_view
+from ai.admin.user_models import (
+    admin_user_model_access_view,
+    admin_user_model_create_view,
+    admin_user_model_delete_view,
+    admin_user_model_search_users_view,
+    admin_user_models_view,
+)
+
+
+def get_ai_admin_urls():
+    """Return the AI admin URL patterns.
+
+    This function is called by DjangoTest.urls when wiring admin URLs.
+    """
+    custom_urls = [
+        path("set-password/", set_password_view, name="set_password_view"),
+        path("view-as/groups/", ai_admin_site.admin_view(admin_view_as_groups_view), name="ai_view_as_groups"),
+        path("view-as/select/", ai_admin_site.admin_view(admin_view_as_select_view), name="ai_view_as_select"),
+        path("docs/", ai_admin_site.admin_view(admin_docs_index_view), name="ai_docs"),
+        path("docs/<slug:slug>/", ai_admin_site.admin_view(admin_docs_view), name="ai_docs_detail"),
+        path("docs/<slug:slug>/content/", ai_admin_site.admin_view(admin_docs_content_view), name="ai_docs_content"),
+        path("docs/<slug:slug>/download/", ai_admin_site.admin_view(admin_docs_download_view), name="ai_docs_download"),
+        path("active-runs/", ai_admin_site.admin_view(admin_active_runs_view), name="ai_active_runs"),
+        path("arm/solve/start/", ai_admin_site.admin_view(admin_arm_solve_start_view), name="ai_arm_solve_start"),
+        path("arm/solve/status/", ai_admin_site.admin_view(admin_arm_solve_status_view), name="ai_arm_solve_status"),
+        path("arm/solve/load-tree/", ai_admin_site.admin_view(admin_arm_solve_load_tree_view), name="ai_arm_solve_load_tree"),
+        path("arm/solve/task-statuses/", ai_admin_site.admin_view(admin_arm_solve_task_statuses_view), name="ai_arm_solve_task_statuses"),
+        path("arm/solve/refresh-task-statuses/", ai_admin_site.admin_view(admin_arm_solve_refresh_task_statuses_view), name="ai_arm_solve_refresh_task_statuses"),
+        path("arm/solve/cancel/", ai_admin_site.admin_view(admin_arm_solve_cancel_view), name="ai_arm_solve_cancel"),
+        path("arm/solve/pause/", ai_admin_site.admin_view(admin_arm_solve_pause_view), name="ai_arm_solve_pause"),
+        path("arm/solve/resume/", ai_admin_site.admin_view(admin_arm_solve_resume_view), name="ai_arm_solve_resume"),
+        path("arm/solve/rerun-pairs/", ai_admin_site.admin_view(admin_arm_solve_rerun_pairs_view), name="ai_arm_solve_rerun_pairs"),
+        path("arm/solve/result/<int:result_id>/download/", ai_admin_site.admin_view(admin_arm_solve_result_download_view), name="ai_arm_solve_result_download"),
+        path("arm/solve/result/<int:result_id>/body/", ai_admin_site.admin_view(admin_arm_solve_result_body_view), name="ai_arm_solve_result_body"),
+        path("arm/solve/report/<str:run_id>/xlsx/", ai_admin_site.admin_view(admin_arm_solve_report_xlsx_view), name="ai_arm_solve_report_xlsx"),
+        path("arm/solve/", ai_admin_site.admin_view(admin_arm_solve_view), name="ai_arm_solve"),
+        # «Отладка промтов» — та же форма/раннер в режиме prompt_debug;
+        # статус, отмена, пауза, тело и XLSX — общие эндпоинты /arm/solve/*
+        # (в них адресация по run_id, странице нужен только старт).
+        path("arm/prompt-debug/start/", ai_admin_site.admin_view(admin_arm_prompt_debug_start_view), name="ai_arm_prompt_debug_start"),
+        path("arm/prompt-debug/skip/", ai_admin_site.admin_view(admin_arm_prompt_debug_skip_view), name="ai_arm_prompt_debug_skip"),
+        path("arm/prompt-debug/", ai_admin_site.admin_view(admin_arm_prompt_debug_view), name="ai_arm_prompt_debug"),
+        path("arm/models/refresh/", ai_admin_site.admin_view(admin_model_status_refresh_view), name="ai_arm_model_status_refresh"),
+        path("arm/models/state/", ai_admin_site.admin_view(admin_model_status_state_view), name="ai_arm_model_status_state"),
+        path("arm/models/", ai_admin_site.admin_view(admin_model_status_view), name="ai_arm_model_status"),
+        path("test-console/start/", ai_admin_site.admin_view(admin_test_console_start_view), name="ai_test_console_start"),
+        path("test-console/status/", ai_admin_site.admin_view(admin_test_console_status_view), name="ai_test_console_status"),
+        path("test-console/logs/view/", ai_admin_site.admin_view(admin_test_console_log_view), name="ai_test_console_log_view"),
+        path("test-console/logs/", ai_admin_site.admin_view(admin_test_console_logs_view), name="ai_test_console_logs"),
+        path("test-console/", ai_admin_site.admin_view(admin_test_console_view), name="ai_test_console"),
+        path("prompts/my/", ai_admin_site.admin_view(admin_my_prompt_view), name="ai_my_prompt"),
+        path("pinned-runs/", ai_admin_site.admin_view(admin_pinned_runs_view), name="ai_pinned_runs"),
+        path("tasks/users/search/", ai_admin_site.admin_view(admin_task_user_search_view), name="ai_task_user_search"),
+        path("tasks/create/", ai_admin_site.admin_view(admin_task_create_view), name="ai_task_create"),
+        path("tasks/<int:task_id>/edit/", ai_admin_site.admin_view(admin_task_edit_view), name="ai_task_edit"),
+        path("tasks/reorder/", ai_admin_site.admin_view(admin_task_reorder_view), name="ai_task_reorder"),
+        path("tasks/<int:task_id>/claim/", ai_admin_site.admin_view(admin_task_claim_view), name="ai_task_claim"),
+        path("tasks/<int:task_id>/assign/", ai_admin_site.admin_view(admin_task_assign_view), name="ai_task_assign"),
+        path("tasks/<int:task_id>/close/", ai_admin_site.admin_view(admin_task_close_view), name="ai_task_close"),
+        path("tasks/<int:task_id>/reopen/", ai_admin_site.admin_view(admin_task_reopen_view), name="ai_task_reopen"),
+        path("tasks/", ai_admin_site.admin_view(admin_tasks_view), name="ai_tasks"),
+        path("prompt-defaults/", ai_admin_site.admin_view(admin_prompt_defaults_view), name="ai_prompt_defaults"),
+        path("prompts/lab/start/", ai_admin_site.admin_view(admin_prompt_lab_start_view), name="ai_prompt_lab_start"),
+        path("prompts/lab/status/", ai_admin_site.admin_view(admin_prompt_lab_status_view), name="ai_prompt_lab_status"),
+        path("prompts/lab/cancel/", ai_admin_site.admin_view(admin_prompt_lab_cancel_view), name="ai_prompt_lab_cancel"),
+        path("prompts/lab/export/", ai_admin_site.admin_view(admin_prompt_lab_export_view), name="ai_prompt_lab_export"),
+        path("prompts/lab/result/<int:result_id>/body/", ai_admin_site.admin_view(admin_prompt_lab_result_body_view), name="ai_prompt_lab_result_body"),
+        path("prompts/lab/", ai_admin_site.admin_view(admin_prompt_lab_view), name="ai_prompt_lab"),
+        path("ai-groups/<int:group_id>/save/", ai_admin_site.admin_view(admin_access_group_save_view), name="ai_access_group_save"),
+        path("ai-groups/<int:group_id>/delete/", ai_admin_site.admin_view(admin_access_group_delete_view), name="ai_access_group_delete"),
+        path("ai-groups/<int:group_id>/members/search/", ai_admin_site.admin_view(admin_access_group_member_search_view), name="ai_access_group_member_search"),
+        path("ai-groups/<int:group_id>/members/toggle/", ai_admin_site.admin_view(admin_access_group_member_toggle_view), name="ai_access_group_member_toggle"),
+        path("ai-groups/", ai_admin_site.admin_view(admin_access_groups_view), name="ai_access_groups"),
+        path("updates/", ai_admin_site.admin_view(admin_updates_view), name="ai_updates"),
+        path("wizard/seen/", ai_admin_site.admin_view(admin_wizard_seen_view), name="ai_wizard_seen"),
+        path("ai/request_logs/task-text/", ai_admin_site.admin_view(admin_request_log_task_text_view), name="ai_request_log_task_text"),
+        path("ai/request_logs/<int:log_id>/xlsx/", ai_admin_site.admin_view(admin_request_log_xlsx_view), name="ai_request_log_xlsx"),
+        path("ai/request_logs/daily-report/", ai_admin_site.admin_view(admin_daily_report_view), name="ai_request_log_daily_report"),
+        # Живые счётчики пакетных строк (AJAX: цифры «Пары»/статус/время).
+        path("ai/request_logs/counters/", ai_admin_site.admin_view(admin_request_logs_counters_view), name="ai_request_logs_counters"),
+        path("ai/request_logs/<int:log_id>/batch-snapshot/", ai_admin_site.admin_view(admin_batch_snapshot_view), name="ai_request_log_batch_snapshot"),
+        path("ai/request_logs/<int:log_id>/", ai_admin_site.admin_view(admin_request_log_detail_view), name="ai_request_log_detail"),
+        path("ai/request_logs/<int:log_id>/resend/", ai_admin_site.admin_view(resend_request_view), name="ai_request_log_resend"),
+        path("ai/request_logs/<int:log_id>/pin/", ai_admin_site.admin_view(admin_pinned_run_toggle_view), name="ai_request_log_pin"),
+        path("ai/request_logs/<int:log_id>/detail-json/", ai_admin_site.admin_view(admin_request_log_detail_json_view), name="ai_request_log_detail_json"),
+        path("ai/request_logs/<int:log_id>/rerun-arm/", ai_admin_site.admin_view(rerun_arm_batch_view), name="ai_request_log_rerun_arm"),
+        path("ai/request_logs/", ai_admin_site.admin_view(admin_request_logs_view), name="ai_request_logs"),
+        # «Контроль токенов» — расход токенов по моделям/пользователям/режимам.
+        path("ai/tokens/", ai_admin_site.admin_view(admin_token_usage_view), name="ai_token_usage"),
+        # «Мои AI-модели» — личные модели пользователя (только владелец).
+        path("user-models/", ai_admin_site.admin_view(admin_user_models_view), name="ai_user_models"),
+        path("user-models/create/", ai_admin_site.admin_view(admin_user_model_create_view), name="ai_user_model_create"),
+        path("user-models/delete/", ai_admin_site.admin_view(admin_user_model_delete_view), name="ai_user_model_delete"),
+        path("user-models/access/", ai_admin_site.admin_view(admin_user_model_access_view), name="ai_user_model_access"),
+        path("user-models/search-users/", ai_admin_site.admin_view(admin_user_model_search_users_view), name="ai_user_model_search_users"),
+        # «Запросы по DL API» — заявки на создание API к dl.gsu.by.
+        path("dl-api-requests/", ai_admin_site.admin_view(admin_dl_api_requests_view), name="ai_dl_api_requests"),
+        path("dl-api-requests/create/", ai_admin_site.admin_view(admin_dl_api_request_create_view), name="ai_dl_api_request_create"),
+        path("dl-api-requests/update/", ai_admin_site.admin_view(admin_dl_api_request_update_view), name="ai_dl_api_request_update"),
+
+        path("test_data/emit_request/",
+             ai_admin_site.admin_view(test_data_emit_request_view),name="ai_test_data_emit_request"),
+        path("test_data/",
+             ai_admin_site.admin_view(test_data_view), name="ai_test_data")
+    ]
+    return [
+        *custom_urls,
+        path("", include((ai_admin_site.get_urls(), ai_admin_site.name), namespace=ai_admin_site.name)),
+    ]

@@ -1,0 +1,1474 @@
+"""ModelAdmin классы для моделей AI-приложения.
+
+Содержит админ-конфигурацию для Prompt, SharedPrompt, Topic, ProgrammingLanguage,
+Task, AIRequestLog, AIModelTestRun и др.
+Включает кастомные actions (экспорт CSV, refresh DL-задач) и ACL-проверки.
+"""
+
+import csv
+import copy
+
+from django.contrib import admin
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.contrib.admin.utils import flatten_fieldsets
+from django.contrib.admin.widgets import (
+    AutocompleteSelect,
+    AutocompleteSelectMultiple,
+    FilteredSelectMultiple,
+)
+from django.contrib.auth import get_user_model
+from django.contrib.auth.admin import UserAdmin
+from django.db.models import Q
+from django import forms
+from django.http import HttpResponse, HttpResponseRedirect
+from django.template.response import TemplateResponse
+from django.utils.html import format_html
+from django.urls import path, reverse
+from django.utils import timezone
+
+
+from ai.db.AIAppSettings import AIAppSettings
+from ai.db.AIAccessGroup import AIAccessGroup
+from ai.db.DLEducationName import DLEducationName
+from ai.db.ExternalDLAccount import ExternalDLAccount
+from ai.db.ProgrammingLanguage import ProgrammingLanguage
+from ai.db.Prompt import Prompt
+from ai.db.SharedPrompt import SharedPrompt
+from ai.db.Task import Task
+from ai.db.TaskSolution import TaskSolution
+from ai.db.Topic import Topic
+
+from ai.admin.changelist import FastChangelistAdminMixin
+from ai.admin.forms import ExternalDLAccountAdminForm, PromptForm, SharedPromptForm, TopicForm
+from ai.admin.search import UniversalUserSearchMixin
+from ai.admin.permissions import (
+    can_access_logs,
+    can_access_prompt_admin,
+    can_edit_access_groups,
+    can_edit_prompt,
+    is_prompt_developer_user,
+    is_staff_or_superuser,
+    is_superuser_user,
+    user_has_key,
+)
+from ai.dl_api_client import (
+    DLApiError,
+    fetch_task_info,
+)
+from ai.http_utils import resolve_dl_session_id
+from ai.services.catalog import (
+    prompt_filter_languages,
+    prompt_filter_topic_label,
+    prompt_filter_topics,
+    prompt_filter_users,
+    prompts_have_untopiced,
+)
+from ai.services.task_registry import apply_dl_task_info
+from ai.services.task_registry import dl_task_url
+from ai.services.user_directory import (
+    display_name_for_user,
+    search_users_for_sharing,
+)
+
+User = get_user_model()
+
+
+class TopicInline(admin.TabularInline):
+    model = Topic
+    extra = 1
+    fk_name = 'programming_language'
+    show_change_link = True
+    fields = ('topic_name_ru', 'topic_name_en', 'topic_name_fr')
+
+
+class _StaffOnlyAdminMixin:
+    """staff/super, либо держатель ключа ``ACCESS_KEY`` (класса-наследника).
+
+    Раньше миксин жёстко резал модули до staff; ТЗ 2026-10-19 «полностью все
+    страницы»: у каждого ModelAdmin есть ключ групп доступа
+    (page.mgmt_*), и держатель ключа (обычно не staff) получает доступ
+    наравне со staff. ACCESS_KEY не задан → поведение прежнее (staff-only).
+    """
+
+    ACCESS_KEY = None
+
+    def _has_access(self, request):
+        allowed = is_staff_or_superuser(request.user)
+        if self.ACCESS_KEY and not allowed:
+            allowed = user_has_key(request.user, self.ACCESS_KEY)
+        return allowed
+
+    def has_module_permission(self, request):
+        return self._has_access(request)
+
+    def has_view_permission(self, request, obj=None):
+        return self._has_access(request)
+
+    def has_add_permission(self, request):
+        return self._has_access(request)
+
+    def has_change_permission(self, request, obj=None):
+        return self._has_access(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return self._has_access(request)
+
+
+class ProgrammingLanguageAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_language"
+
+    inlines = [TopicInline]
+    list_display = ('language_name',)
+    search_fields = ('language_name',)
+
+
+class TopicAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_topic"
+
+    form = TopicForm
+    list_display = ('topic_name_ru', 'programming_language')
+    # Колонка языка — FK на строку списка; без select_related это запрос на
+    # каждую строку.
+    list_select_related = ('programming_language',)
+    list_filter = ('programming_language',)
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    search_fields = ('topic_name_ru', 'topic_name_en', 'topic_name_fr')
+    raw_id_fields = ('programming_language',)
+    fieldsets = (
+        (None, {"fields": ("topic_name_ru", "topic_name_en", "topic_name_fr", "programming_language")}),
+    )
+    actions = ("auto_translate_selected",)
+
+    @admin.action(description="Автоперевод → EN / FR")
+    def auto_translate_selected(self, request, queryset):
+        from ai.services.auto_translate import translate_object
+        translated, skipped, failed = 0, 0, 0
+        for obj in queryset:
+            results = translate_object(obj, ["topic_name"])
+            for v in results.values():
+                if v.startswith("skipped"):
+                    skipped += 1
+                elif v == "failed":
+                    failed += 1
+                else:
+                    translated += 1
+        msg = f"Переведено: {translated}, пропущено: {skipped}, ошибок: {failed}"
+        self.message_user(request, msg, level=("success" if not failed else "warning"))
+
+
+class PromptUserIdFilter(admin.SimpleListFilter):
+    title = "Владелец / редактор"
+    parameter_name = "user_id"
+
+    def lookups(self, request, model_admin):
+        # is_superuser_user: честный режим «Посмотреть как…» тоже считает
+        # супер-обход отключённым.
+        if not is_superuser_user(request.user):
+            return ()
+        # Список строится на каждой загрузке changelist'а — из кэша
+        # ai/services/catalog.py (инвалидация — сигналы Prompt/редакторов).
+        return prompt_filter_users()
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if not value:
+            return queryset
+        return queryset.filter(Q(owner_id=value) | Q(editors__id=value)).distinct()
+
+
+class PromptLanguageFilter(admin.SimpleListFilter):
+    """Единый фильтр языка для Prompt: и тема-язык, и собственный FK.
+
+    Промпт может быть привязан к языку без темы («на весь язык») — фильтр по
+    topic__programming_language такие записи терял бы.
+    """
+
+    title = "Язык программирования"
+    parameter_name = "lang"
+
+    def lookups(self, request, model_admin):
+        return prompt_filter_languages()
+
+    def choices(self, changelist):
+        """Как стоковый ``SimpleListFilter.choices``, но смена языка снимает
+        тему: темы принадлежат языку, и сохранённая тема другого языка давала
+        пустой список («фильтры сломались»)."""
+        yield {
+            "selected": self.value() is None,
+            "query_string": changelist.get_query_string(remove=[self.parameter_name]),
+            "display": "Все",
+        }
+        for lookup, title in self.lookup_choices:
+            yield {
+                "selected": self.value() == str(lookup),
+                "query_string": changelist.get_query_string(
+                    {self.parameter_name: lookup},
+                    remove=["topic", "topic__id__exact"],
+                ),
+                "display": title,
+            }
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if not value:
+            return queryset
+        return queryset.filter(
+            Q(topic__programming_language_id=value) | Q(programming_language_id=value)
+        )
+
+
+#: Значение опции «без темы» в ``PromptTopicFilter``.
+_TOPIC_NONE = "__none__"
+
+
+class PromptTopicFilter(admin.SimpleListFilter):
+    """Темы только тех языков, что выбраны фильтром языка.
+
+    Стоковый FK-фильтр выводил ВСЕ темы курса, с одинаковыми названиями у
+    разных языков (дубли неотличимы) — и после выбора языка список тем не
+    сужался, поэтому легко было выбрать несовместимую пару и получить пустой
+    список. Здесь подпись включает язык, выдача ограничена активным языком и
+    только темами, у которых есть промпты.
+    """
+
+    title = "Тема"
+    parameter_name = "topic"
+
+    @staticmethod
+    def _active_language(request):
+        value = (request.GET.get("lang") or "").strip()
+        return value if value.isdigit() else None
+
+    # Старые закладки со стоковым topic__id__exact не ломаются и без
+    # объявления параметра: ChangeList пропускает необработанный параметр как
+    # обычный ORM-lookup (topic__id__exact — валидный путь поля).
+
+    def lookups(self, request, model_admin):
+        language_id = self._active_language(request)
+        choices = dict(prompt_filter_topics(language_id))
+        # Активное значение обязано быть среди опций даже если у темы нет
+        # промптов (или она другого языка): иначе браузер показывает первый
+        # пункт «Все», и фильтр выглядит сброшенным.
+        value = self.value()
+        if value and value != _TOPIC_NONE and value not in choices:
+            label = prompt_filter_topic_label(value)
+            if label is not None:
+                choices[value] = label
+        if value == _TOPIC_NONE or prompts_have_untopiced():
+            choices[_TOPIC_NONE] = "— без темы (на весь язык)"
+        return list(choices.items())
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if not value:
+            return queryset
+        if value == _TOPIC_NONE:
+            return queryset.filter(topic__isnull=True)
+        return queryset.filter(topic_id=value)
+
+
+class PromptMineFilter(admin.SimpleListFilter):
+    """«Только мои» — владелец или редактор текущего пользователя.
+
+    Раньше этот режим включался только недокументированным ``?mine=1`` и
+    ронял changelist в редирект ``?e=1`` (параметр никто не потреблял).
+    """
+
+    title = "Мои"
+    parameter_name = "mine"
+
+    def lookups(self, request, model_admin):
+        return (("1", "Только мои"),)
+
+    def queryset(self, request, queryset):
+        if self.value() != "1":
+            return queryset
+        return queryset.filter(
+            Q(owner=request.user) | Q(editors=request.user),
+        ).distinct()
+
+
+class PromptAddEditorForm(forms.Form):
+    """Один пользователь, которому даём право править выбранные промпты.
+
+    Поле — административный autocomplete (select2): ищем по ФИО, логину и
+    DL-ID тем же эндпоинтом, что и поле «Редакторы» на форме промпта.
+    """
+
+    editor = forms.ModelChoiceField(
+        queryset=User.objects.none(),
+        label="Пользователь",
+        help_text="Начните вводить ФИО, логин или DL-ID.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from .site import ai_admin_site
+
+        field = self.fields["editor"]
+        field.queryset = User.objects.filter(is_active=True)
+        field.widget = AutocompleteSelect(
+            Prompt._meta.get_field("editors"), ai_admin_site,
+        )
+        # AutocompleteSelect читает варианты из self.choices (ModelChoiceIterator):
+        # у поля, созданного без него, виджет остался бы с пустым списком и
+        # падал на optgroups при рендере формы.
+        field.widget.choices = field.choices
+
+
+class PromptEditorAutocomplete(AutocompleteSelectMultiple):
+    """select2 для поля «Редакторы» — поиск мимо гейта ``page.mgmt_users``.
+
+    Стоковый ``admin:autocomplete`` пользователей доступен только ключу
+    управления пользователями, а поле «Доступ» нужно ВЛАДЕЛЬЦУ промпта —
+    он обычный разработчик промптов. Источник тот же справочник, что в
+    «Моих моделях» (``search_users_for_sharing``): ФИО / логин / DL-id.
+    """
+
+    def get_url(self):
+        return reverse("admin:ai_prompt_editor_search")
+
+
+class PromptAdmin(FastChangelistAdminMixin, UniversalUserSearchMixin, admin.ModelAdmin):
+    form = PromptForm
+    # Поиск владельца/редактора: id (pk или DL-id), ФИО в любом порядке.
+    user_search_relations = ("owner", "editors")
+    list_display = (
+        'prompt_name_ru',
+        'programming_language_name',
+        'topic',
+        'mode_name',
+        'owner_user_id',
+        'owner_username',
+        'short_prompt_text',
+    )
+    list_display_links = ('prompt_name_ru',)
+    # Режим первым: «Все / Реши задачу / В чём ошибка» — главный селектор
+    # списка (см. MODE_SOLVE / MODE_FIND_ERROR). Тема — свой фильтр: подпись
+    # с языком и выдача только по активному языку (PromptTopicFilter).
+    list_filter = (
+        'mode', PromptUserIdFilter, PromptLanguageFilter, PromptTopicFilter,
+        PromptMineFilter,
+    )
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    list_per_page = 25
+    # Владельца/редакторов ищет ТОЛЬКО универсальный миксин (id точно, ФИО в
+    # любом порядке, инициалы): дублировать owner__* здесь нельзя — подстрочный
+    # owner__username ломал бы точность числового запроса («30» находил user_302).
+    search_fields = ('prompt_name_ru', 'prompt_text_ru')
+    autocomplete_fields = ("owner", "editors")
+    actions = (
+        "export_prompts_csv", "auto_translate_selected", "set_mode_solve",
+        "set_mode_find_error", "add_editor",
+    )
+
+    @staticmethod
+    def _bump_prompt_catalogs():
+        # queryset.update() не поднимает post_save, поэтому эпоху каталогов
+        # (списки чата/«Реши задачу» и фильтров админки) сбрасываем явно —
+        # иначе правка была бы видна только после TTL кэша.
+        from ..services.cache_epochs import bump_epoch
+
+        bump_epoch("prompt_meta")
+
+    @admin.action(description='Назначить режим «Реши задачу»')
+    def set_mode_solve(self, request, queryset):
+        queryset.update(mode=Prompt.MODE_SOLVE)
+        self._bump_prompt_catalogs()
+        self.message_user(request, "Выбранным промптам назначен режим «Реши задачу».")
+
+    @admin.action(description='Назначить режим «В чём ошибка»')
+    def set_mode_find_error(self, request, queryset):
+        queryset.update(mode=Prompt.MODE_FIND_ERROR)
+        self._bump_prompt_catalogs()
+        self.message_user(request, "Выбранным промптам назначен режим «В чём ошибка».")
+
+    def has_add_editor_permission(self, request):
+        # Выдача прав на чужие промпты — суперюзер (зеркало «Доступ»-
+        # fieldset'а и инлайна на странице пользователя).
+        return is_superuser_user(request.user)
+
+    @admin.action(
+        description="Добавить редактора…", permissions=["add_editor"],
+    )
+    def add_editor(self, request, queryset):
+        """Массовая выдача права редактирования: выделить промпты → выбрать
+        человека один раз → он добавлен в ``editors`` всех выбранных.
+
+        Первый POST — вызов действия; второй — уже форма с выбранным
+        пользователем (различаем по наличию поля ``editor``).
+        """
+        applying = "editor" in request.POST
+        form = PromptAddEditorForm(request.POST if applying else None)
+        if applying and form.is_valid():
+            editor = form.cleaned_data["editor"]
+            changed = 0
+            for prompt in queryset:
+                if prompt.owner_id == editor.pk:
+                    continue  # владельцу право не нужно — он и так правит
+                prompt.editors.add(editor)
+                changed += 1
+            self.message_user(
+                request,
+                f"Редактор «{display_name_for_user(editor)}» добавлен: "
+                f"{changed} из {queryset.count()} промптов"
+                + (" (у остальных он владелец)." if changed < queryset.count() else "."),
+            )
+            return HttpResponseRedirect(request.get_full_path())
+
+        prompt_ids = list(queryset.values_list("pk", flat=True))
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Добавить редактора",
+            "form": form,
+            "prompt_count": len(prompt_ids),
+            "prompt_ids": prompt_ids,
+            "prompt_preview": list(
+                queryset.order_by("prompt_name_ru", "pk")
+                .values_list("prompt_name_ru", "pk")[:20]
+            ),
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
+            "opts": self.model._meta,
+        }
+        return TemplateResponse(
+            request, "admin/ai/prompt_add_editor.html", context,
+        )
+
+    # Prompt has no created_at field, so date_hierarchy is intentionally None.
+    date_hierarchy = None
+
+    def get_queryset(self, request):
+        # Аннотация — превью текста для колонки «Текст промпта»: без неё список
+        # тянет полноценный prompt_text_ru каждой строки (мегабайты на полной
+        # странице), хотя в ячейку попадают первые 100 символов.
+        from django.db.models.functions import Substr
+
+        queryset = (
+            super()
+            .get_queryset(request)
+            .select_related(
+                "topic", "topic__programming_language",
+                "programming_language", "owner",
+            )
+            .annotate(prompt_text_preview=Substr("prompt_text_ru", 1, 101))
+        )
+        from .my_prompt import is_mine_only_request
+        if is_mine_only_request(request):
+            # «Мои» — намерение юзера, не ACL: только владелец/редактор.
+            return queryset.filter(
+                Q(owner=request.user) | Q(editors=request.user),
+            ).distinct()
+        return queryset
+
+    @admin.display(description="Режим", ordering="mode")
+    def mode_name(self, obj):
+        return obj.get_mode_display()
+
+    def _can_edit_prompt(self, request, obj):
+        # Правила живут в permissions.can_edit_prompt (общий владелец с
+        # фоновым ARM-раннером «Отладка промтов», у него нет request).
+        return can_edit_prompt(request.user, obj)
+
+    def has_module_permission(self, request):
+        if is_staff_or_superuser(request.user):
+            return True
+        return is_prompt_developer_user(request.user) or can_access_prompt_admin(request)
+
+    def has_view_permission(self, request, obj=None):
+        return (
+            is_staff_or_superuser(request.user)
+            or is_prompt_developer_user(request.user)
+            or can_access_prompt_admin(request)
+            # «Видеть все промпты» — ключ-действие (baseline 2026-10-19),
+            # открывающий и ModelAdmin-листинг чужих промптов на чтение.
+            or user_has_key(request.user, "page.prompt_admin_all")
+        )
+
+    def has_change_permission(self, request, obj=None):
+        return self._can_edit_prompt(request, obj)
+
+    def has_add_permission(self, request):
+        return (
+            is_staff_or_superuser(request.user)
+            or is_prompt_developer_user(request.user)
+            or can_access_prompt_admin(request)
+        )
+
+    def has_delete_permission(self, request, obj=None):
+        if is_superuser_user(request.user):
+            return True
+        if not (is_staff_or_superuser(request.user) or is_prompt_developer_user(request.user)):
+            return False
+        if obj is None:
+            return True
+        return obj.owner_id == request.user.pk
+
+    def get_fieldsets(self, request, obj=None):
+        # Локализованные поля (prompt_name_ru/en/fr, prompt_text_ru/en/fr)
+        # рендерятся ЯЗЫКОВЫМИ ТАБАМИ RU/EN/FR (prompt_translate_tabs.js):
+        # на экране всегда 1 название + 1 textarea; при переключении таба
+        # пустой язык авто-переводится с заполненного (AJAX →
+        # translate-field/ → Google Translate). Базовые prompt_name /
+        # prompt_text (fallback для старых записей) и переопределение текста
+        # спрятаны в свёрнутый блок, чтобы не громоздить форму.
+        main_fields = (
+            "mode", "programming_language", "topic", "shared_prompt",
+            "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+            "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+        )
+        advanced_fields = ("prompt_text_override",)
+        if is_superuser_user(request.user):
+            return (
+                (None, {"fields": main_fields}),
+                ("Переопределение текста", {"fields": advanced_fields, "classes": ("collapse",)}),
+                ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
+            )
+        fieldsets = [
+            (None, {"fields": main_fields}),
+            ("Переопределение текста", {"fields": advanced_fields, "classes": ("collapse",)}),
+        ]
+        if obj is not None:
+            # «Доступ» виден всем, кому промпт доступен: владелец/редактор
+            # добавляет соредакторов (см. get_readonly_fields), остальные
+            # видят блок только на чтение.
+            fieldsets.append(
+                ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
+            )
+        return tuple(fieldsets)
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "translate-field/",
+                self.admin_site.admin_view(self.admin_translate_field_view),
+                name="ai_prompt_translate_field",
+            ),
+            path(
+                "editor-search/",
+                self.admin_site.admin_view(self.editor_search_view),
+                name="ai_prompt_editor_search",
+            ),
+        ]
+        return custom + urls
+
+    def editor_search_view(self, request):
+        """AJAX-поиск пользователя для поля «Редакторы» (select2).
+
+        Формат select2: ``{"results": [{"id", "text"}]}``. Гейт — тот же, что
+        у самого листинга промптов: владелец/редактор промпта является
+        разработчиком промптов, а не «управляющим пользователями».
+        """
+        from django.http import JsonResponse
+
+        if request.method != "GET":
+            return JsonResponse({"results": []}, status=405)
+        if not can_access_prompt_admin(request):
+            return JsonResponse({"results": []}, status=403)
+        term = (request.GET.get("term") or "").strip()
+        results = []
+        for item in search_users_for_sharing(term, request.user):
+            dl_id = item.get("dl_id") or ""
+            text = f'{item["display"]} ({dl_id})' if dl_id else item["display"]
+            results.append({"id": item["id"], "text": text})
+        return JsonResponse({"results": results})
+
+    def admin_translate_field_view(self, request):
+        """AJAX-перевод для языковых табов формы промпта.
+
+        POST text + target (ru|en|fr) → Google Translate (deep-translator,
+        тот же сервис, что у массового автоперевода). Только для тех, кто
+        может редактировать промпты; /ai/admin/ исключён из RateLimitMiddleware.
+        """
+        from django.http import JsonResponse
+
+        if request.method != "POST":
+            return JsonResponse({"success": False, "error": "Метод не поддерживается"}, status=403)
+        if not self.has_change_permission(request):
+            return JsonResponse({"success": False, "error": "Нет прав на редактирование промптов"}, status=403)
+        text = (request.POST.get("text") or "").strip()
+        target = request.POST.get("target") or ""
+        if target not in ("ru", "en", "fr"):
+            return JsonResponse({"success": False, "error": "Неизвестный целевой язык"}, status=400)
+        if not text:
+            return JsonResponse({"success": False, "error": "Нет текста для перевода"}, status=400)
+        from ..services.auto_translate import translate_text
+        translated = translate_text(text, target)
+        if not translated:
+            return JsonResponse(
+                {"success": False, "error": "Сервис перевода недоступен, попробуйте позже"},
+                status=502,
+            )
+        return JsonResponse({"success": True, "text": translated})
+
+    def get_readonly_fields(self, request, obj=None):
+        if is_staff_or_superuser(request.user):
+            return ()
+        if self._can_edit_prompt(request, obj):
+            # Владелец/редактор управляет составом редакторов, но не может
+            # передать владение — это делает суперюзер.
+            return ("owner",)
+        return (
+            "owner", "editors",
+            "programming_language", "topic",
+            "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+            "shared_prompt", "prompt_text_override",
+            "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+        )
+
+    def formfield_for_manytomany(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_manytomany(db_field, request, **kwargs)
+        if db_field.name == "editors" and formfield is not None:
+            # Свой поиск редакторов (владельцу без page.mgmt_users стоковый
+            # admin:autocomplete вернул бы 403).
+            # Как у стокового formfield_for_manytomany: виджету передаётся
+            # само M2M-поле (не relation) — от него select2 берёт
+            # app_label/model/field и признак required.
+            formfield.widget = PromptEditorAutocomplete(
+                db_field, self.admin_site,
+            )
+            formfield.widget.choices = formfield.choices
+        return formfield
+
+    def save_model(self, request, obj, form, change):
+        if not change and not obj.owner_id:
+            obj.owner = request.user
+        super().save_model(request, obj, form, change)
+        if not is_superuser_user(request.user):
+            obj.editors.add(request.user)
+
+    def export_prompts_csv(self, request, queryset):
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="prompts.csv"'
+        writer = csv.writer(response)
+        writer.writerow(["id", "prompt_name", "language", "topic", "owner_id", "owner_username", "prompt_text"])
+        for prompt in queryset.select_related("topic", "topic__programming_language", "programming_language", "owner"):
+            topic = prompt.topic
+            language = (
+                topic.programming_language.language_name
+                if topic and topic.programming_language
+                else (prompt.programming_language.language_name if prompt.programming_language else "")
+            )
+            writer.writerow([
+                prompt.id,
+                prompt.prompt_name_ru or "",
+                language,
+                topic.topic_name_ru if topic else "",
+                prompt.owner_id or "",
+                prompt.owner.username if prompt.owner else "",
+                prompt.prompt_text_ru,
+            ])
+        return response
+    export_prompts_csv.short_description = "Экспорт выбранных промптов в CSV"
+
+    @admin.action(description="Автоперевод → EN / FR")
+    def auto_translate_selected(self, request, queryset):
+        from ai.services.auto_translate import translate_object
+        translated, skipped, failed = 0, 0, 0
+        for obj in queryset:
+            results = translate_object(obj, ["prompt_name", "prompt_text"])
+            for v in results.values():
+                if v.startswith("skipped"):
+                    skipped += 1
+                elif v == "failed":
+                    failed += 1
+                else:
+                    translated += 1
+        msg = f"Переведено: {translated}, пропущено: {skipped}, ошибок: {failed}"
+        self.message_user(request, msg, level=("success" if not failed else "warning"))
+
+    def programming_language_name(self, obj):
+        # Язык промпта: приоритет у темы (тема всегда принадлежит языку);
+        # без темы — собственный язык («промпт на весь язык»). Раньше для
+        # промптов без темы здесь всегда был «-».
+        if obj.topic and obj.topic.programming_language:
+            return obj.topic.programming_language.language_name
+        if obj.programming_language_id:
+            return obj.programming_language.language_name
+        return "-"
+    programming_language_name.short_description = "Язык программирования"
+    programming_language_name.admin_order_field = "topic__programming_language__language_name"
+
+    def programming_language(self, obj):
+        # Display method for the read-only rendering of the declared
+        # ``programming_language`` form field (see PromptForm). These two are
+        # coupled — remove the declared field and this method breaks the
+        # readonly/fieldset path with FieldError.
+        return self.programming_language_name(obj)
+    programming_language.short_description = "Язык программирования"
+
+    def owner_user_id(self, obj):
+        return obj.owner_id or "-"
+    owner_user_id.short_description = "ID владельца"
+    owner_user_id.admin_order_field = "owner_id"
+
+    def owner_username(self, obj):
+        return obj.owner.username if obj.owner else "-"
+    owner_username.short_description = "Владелец"
+
+    def short_prompt_text(self, obj):
+        # Превью посчитано БД (Substr 101): 101 символ = текст длиннее 100,
+        # показываем первые 100 + «...» — ровно как раньше. Fallback для
+        # объектов не из changelist-queryset (например, тесты/другие вьюхи).
+        text = getattr(obj, "prompt_text_preview", None)
+        if text is None:
+            text = obj.prompt_text_ru or ""
+            return f"{text[:100]}..." if len(text) > 100 else text
+        return f"{text[:100]}..." if len(text) > 100 else text
+    short_prompt_text.short_description = "Текст промпта"
+
+
+class SharedPromptAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, admin.ModelAdmin):
+    # Шаблоны промптов (shared): staff, либо ключ page.mgmt_shared_prompt.
+    ACCESS_KEY = "page.mgmt_shared_prompt"
+
+    form = SharedPromptForm
+    list_display = ('prompt_name_ru', 'mode', 'language_list', 'updated_at', 'owner_username')
+    list_display_links = ('prompt_name_ru',)
+    list_filter = ('mode', 'programming_languages')
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    search_fields = ('prompt_name_ru', 'prompt_text_ru')
+    autocomplete_fields = ('owner', 'editors')
+    # 'editors' is rendered by autocomplete_fields above (autocomplete wins in
+    # Django's formfield_for_manytomany), so only 'programming_languages' uses
+    # the horizontal filter widget — listing 'editors' here was dead config.
+    filter_horizontal = ('programming_languages',)
+    actions = ("auto_translate_selected",)
+
+    def get_queryset(self, request):
+        # language_list дёргал programming_languages по запросу на строку —
+        # prefetch; владелец колонки — select_related (JOIN дешевле отдельного
+        # prefetch-запроса).
+        return super().get_queryset(request).select_related("owner").prefetch_related(
+            "programming_languages",
+        )
+
+    def language_list(self, obj):
+        langs = obj.programming_languages.all()
+        return ", ".join([l.language_name for l in langs]) if langs else "Все языки"
+    language_list.short_description = "Языки"
+
+    def owner_username(self, obj):
+        return obj.owner.username if obj.owner else "-"
+    owner_username.short_description = "Владелец"
+
+    @admin.action(description="Автоперевод → EN / FR")
+    def auto_translate_selected(self, request, queryset):
+        from ai.services.auto_translate import translate_object
+        translated, skipped, failed = 0, 0, 0
+        for obj in queryset:
+            results = translate_object(obj, ["prompt_name", "prompt_text"])
+            for v in results.values():
+                if v.startswith("skipped"):
+                    skipped += 1
+                elif v == "failed":
+                    failed += 1
+                else:
+                    translated += 1
+        msg = f"Переведено: {translated}, пропущено: {skipped}, ошибок: {failed}"
+        self.message_user(request, msg, level=("success" if not failed else "warning"))
+
+    def has_module_permission(self, request):
+        return self._has_access(request)
+
+    def has_view_permission(self, request, obj=None):
+        return self._has_access(request)
+
+    def has_add_permission(self, request):
+        return self._has_access(request)
+
+    def has_change_permission(self, request, obj=None):
+        return self._has_access(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return self._has_access(request)
+
+    def get_fieldsets(self, request, obj=None):
+        return (
+            (None, {"fields": (
+                "prompt_name_ru", "prompt_name_en", "prompt_name_fr",
+                "mode",
+                "prompt_text_ru", "prompt_text_en", "prompt_text_fr",
+                "programming_languages",
+            )}),
+            ("Доступ", {"fields": ("owner", "editors"), "classes": ("collapse",)}),
+        )
+
+
+class AIAppSettingsAdmin(admin.ModelAdmin):
+    list_display = ("is_enabled", "updated_at")
+    # favorites_epoch на форме не нужен (меняется только командой
+    # reset_favorites_epoch); updated_at — авторасчётное, тоже не редактируем.
+    exclude = ("favorites_epoch", "updated_at")
+    change_form_template = "admin/ai/aiappsettings_change_form.html"
+
+    # Страница выдаваемая группам (ТЗ 2026-10-19): staff/super ИЛИ ключ
+    # page.app_settings (аккордеон «Страниц» в «Группах доступа»). Не входит
+    # в baseline («Закреплено»/настройка всего ИИ, не «Раздел ИИ»).
+    def _app_settings_access(self, request):
+        return is_staff_or_superuser(request.user) or user_has_key(
+            request.user, "page.app_settings"
+        )
+
+    def has_module_permission(self, request):
+        return self._app_settings_access(request)
+
+    def has_view_permission(self, request, obj=None):
+        return self._app_settings_access(request)
+
+    def has_change_permission(self, request, obj=None):
+        return self._app_settings_access(request)
+
+    def has_add_permission(self, request):
+        if not self._app_settings_access(request):
+            return False
+        if AIAppSettings.objects.exists():
+            return False
+        return super().has_add_permission(request)
+
+    def has_delete_permission(self, request, obj=None):
+        if not self._app_settings_access(request):
+            return False
+        return False
+
+    def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
+        """Добавляем на страницу настроек таблицы последних запросов.
+
+        Два блока: последние 5 batch-solve прогонов (строки лёгкие — шапка и
+        count-агрегат; полные результаты грузятся ЛЕНИВО по клику через
+        admin_batch_snapshot_view — иначе большой прогон раздувал страницу
+        до ~6 МБ) и последние 5 записей журнала — те же, что в «Журнале
+        запросов», но сокращённые. Если нужно искать конкретную запись —
+        кнопка ведёт в полный журнал с поиском.
+        """
+        from .request_logs import build_recent_batch_rows, build_recent_log_rows
+
+        extra_context = {**(extra_context or {})}
+        # На add-странице (object_id is None) таблиц последних запросов быть не
+        # может (нет объекта) — не собираем их впустую.
+        if object_id is not None:
+            extra_context.update(build_recent_log_rows(request, limit=5))
+            extra_context.update(build_recent_batch_rows(request, limit=5))
+        return super().changeform_view(request, object_id, form_url, extra_context)
+
+
+class ExternalDLAccountAdmin(
+    FastChangelistAdminMixin, _StaffOnlyAdminMixin, UniversalUserSearchMixin, admin.ModelAdmin,
+):
+    """Admin for viewing external DL accounts (dl.gsu.by user info).
+
+    Карточка — основное место выдачи «Групп доступа» конкретному человеку
+    (ТЗ 2026-10-20): поле user_ai_access_groups правит состав групп ЕЁ
+    локального пользователя. Редактируют суперюзер/держатель page.groups
+    (can_edit_access_groups); прочие держатели page.mgmt_accounts блока не
+    видят вовсе (гейтинг в get_form — _StaffOnlyAdminMixin уже дал им
+    полный change, has_*_permission не годится). Персистит save_model.
+    """
+
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_accounts"
+    form = ExternalDLAccountAdminForm
+    list_display = ("external_user_id", "external_login", "external_first_name",
+                    "external_last_name", "dl_email", "education_summary",
+                    "user_link", "created_at", "updated_at")
+    list_display_links = ("external_user_id",)
+    # user_link/education_summary читают связанного user'а — один JOIN вместо
+    # запроса на каждую строку.
+    list_select_related = ("user",)
+    list_filter = ("created_at", "updated_at")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    # Связанного пользователя ищет универсальный миксин (user_search_relations),
+    # поэтому user__username здесь не дублируется.
+    search_fields = ("external_user_id", "external_login",
+                     "external_first_name", "external_last_name",
+                     "dl_email", "education_school_no")
+    # id (DL-id / pk / логин) и ФИО в любом порядке — по самому DL-аккаунту
+    # и по связанному локальному пользователю.
+    user_search_relations = ("user",)
+    user_search_flat_fields = (
+        "external_user_id", "external_login",
+        "external_first_name", "external_last_name",
+    )
+    # Учебные данные приходят из dl.gsu.by при входе пользователя (dl-rest-api.json
+    # get-user-info) — руками их не правим, только смотрим. external_login
+    # («Логин dl.gsu.by») тоже приходит извне — из формы убран полностью,
+    # не обязательное поле (правится только самим dl.gsu.by).
+    readonly_fields = ("dl_email", "external_login", "education_form",
+                       "education_school_id", "education_school_kind",
+                       "education_school_no", "education_group_mask_id",
+                       "education_form_letter", "created_at", "updated_at")
+    raw_id_fields = ("user",)
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        # Поле остаётся только у редакторов групп; у аккаунта БЕЗ связанного
+        # юзера его нет (менять нечего). На add-странице (obj=None) поле у
+        # редактора живёт: после сохранения account.user известен, save_model
+        # выдаст группы. Не-редакторам поля нет — подделать POST нельзя
+        # (save_model смотрит на cleaned_data, которого без поля не будет).
+        if not can_edit_access_groups(request) or (
+            obj is not None and obj.user_id is None
+        ):
+            form.base_fields.pop("user_ai_access_groups", None)
+        return form
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # M2M живёт на account.user, ModelForm.save() его не пишет; поле в
+        # cleaned_data есть только когда есть право (и юзер выбран).
+        groups = form.cleaned_data.get("user_ai_access_groups")
+        if groups is not None and obj.user_id:
+            obj.user.ai_access_groups.set(groups)
+
+    def user_link(self, obj):
+        if not obj.user:
+            return "-"
+        # «Переход на пользователя»: полноценная страница юзера (is_staff,
+        # is_superuser, группы) — выдача прав происходит там (ТЗ 2026-10-19).
+        return format_html(
+            '<a href="{}">{}</a>', reverse("admin:auth_user_change", args=[obj.user_id]),
+            obj.user.username,
+        )
+    user_link.short_description = "Локальный пользователь"
+    user_link.admin_order_field = "user__username"
+
+    def education_summary(self, obj):
+        """Компактная сводка блока education: «форма · школа № · группа · класс»."""
+        parts = [obj.education_form, obj.education_school_no,
+                 obj.education_group_mask_id, obj.education_form_letter]
+        parts = [p for p in parts if p]
+        return " · ".join(parts) if parts else "—"
+    education_summary.short_description = "Учебные данные"
+
+
+class UpdateLogAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Управление записями «Обновлений»: публикация отклонённых и скрытие шумных.
+
+    Интерактивная синхронизация (sync_update_log --interactive) пишет невыбранные
+    коммиты со hidden=True; отсюда их можно опубликовать (action «Показать
+    выбранные») или скрыть любой другой коммит. Из навигации спрятан
+    (_HIDDEN_NAV_OBJECT_NAMES) — на «Обновления» ведёт ссылка «Скрытые записи».
+    """
+
+    # Ключ «Групп доступа», открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_update_log"
+    list_display = ("commit_date", "author", "short_description", "hidden", "commit_hash")
+    list_display_links = ("commit_date",)
+    list_filter = ("hidden", "commit_date")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    search_fields = ("description", "author")
+
+    def has_module_permission(self, request):
+        return is_superuser_user(request.user) or self._has_access(request)
+
+    def has_view_permission(self, request, obj=None):
+        return is_superuser_user(request.user) or self._has_access(request)
+
+    def has_add_permission(self, request):
+        return is_superuser_user(request.user)
+
+    def has_change_permission(self, request, obj=None):
+        # Публикация/скрытие — суперюзер ИЛИ действие action.updates_publish
+        # (аккордеон страницы «Обновления» в «Группах доступа»).
+        return is_superuser_user(request.user) or user_has_key(
+            request.user, "action.updates_publish"
+        )
+
+    def has_delete_permission(self, request, obj=None):
+        return is_superuser_user(request.user) or user_has_key(
+            request.user, "action.updates_publish"
+        )
+
+    def short_description(self, obj):
+        text = obj.description or ""
+        return f"{text[:100]}..." if len(text) > 100 else text
+    short_description.short_description = "Содержание обновления"
+
+    @admin.action(description="Показать выбранные")
+    def publish_selected(self, request, queryset):
+        updated = queryset.update(hidden=False)
+        self.message_user(request, f"Опубликовано записей: {updated}.")
+
+    @admin.action(description="Скрыть выбранные")
+    def hide_selected(self, request, queryset):
+        updated = queryset.update(hidden=True)
+        self.message_user(request, f"Скрыто записей: {updated}.")
+
+    actions = ("publish_selected", "hide_selected")
+
+
+class AuthorAliasAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Справочник ников git → ФИО + группа для страницы «Обновления».
+
+    Ведётся вручную (нет автопривязки к ExternalDLAccount: git-ник не обязан
+    совпадать с DL-логином); отображение на /ai/admin/updates/ резолвится при
+    рендере — правка записи ретроактивно чинит прошлые строки.
+    """
+
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_author_alias"
+    list_display = ("nick", "full_name", "group")
+    search_fields = ("nick", "full_name", "group")
+
+
+class DLEducationNameAdminForm(forms.ModelForm):
+    """Форма справочника: «Вуз/школа» — ВЫБОР из заведений справочника, а не
+    свободный ввод ключа. Заполняется только у записей «Группа/класс» и
+    хранит key school-строки (``DLEducationName.school``)."""
+
+    school = forms.ChoiceField(
+        label="Вуз/школа (key из schoolId)",
+        required=False,
+        help_text="Только для записей «Группа/класс»: заведение, к которому относится группа.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        choices = [
+            (row.key, f"{row.key} — {row.title}")
+            for row in DLEducationName.objects.filter(kind=DLEducationName.KIND_SCHOOL).order_by("title")
+        ]
+        self.fields["school"].choices = [("", "— не выбрано —")] + choices
+
+    class Meta:
+        model = DLEducationName
+        fields = "__all__"
+
+
+class DLEducationNameAdmin(_StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Справочник DL «id → название» (schoolId/groupMaskId), ведётся вручную.
+
+    REST настоящих названий групп/вузов не отдаёт; дневной отчёт журнала
+    (и далее — другие страницы) резолвит названия при рендере через
+    education_title_maps — правка записи ретроактивно чинит прошлые строки.
+    Группы привязаны к заведениям (school key), фолбэк дневного отчёта
+    показывает школу студента от привязки его группы.
+    """
+
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_education_names"
+    form = DLEducationNameAdminForm
+    list_display = ("kind", "key", "title", "school_title")
+    list_filter = ("kind",)
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    search_fields = ("key", "title")
+
+    def get_queryset(self, request):
+        # Название школы для group-строк — коррелированный подзапрос в том же
+        # SQL (одна поездка в БД на всю страницу) вместо запроса на строку.
+        from django.db.models import OuterRef, Subquery
+
+        school_title = (
+            DLEducationName.objects
+            .filter(kind=DLEducationName.KIND_SCHOOL, key=OuterRef("school"))
+            .values("title")[:1]
+        )
+        return super().get_queryset(request).annotate(
+            _ai_school_title=Subquery(school_title),
+        )
+
+    @admin.display(description="Вуз/школа группы")
+    def school_title(self, obj):
+        """Название привязанного заведения (только для group-строк)."""
+        if obj.kind != DLEducationName.KIND_GROUP or not obj.school:
+            return "—"
+        title = getattr(obj, "_ai_school_title", None)
+        if title is None:
+            title = DLEducationName.objects.filter(
+                kind=DLEducationName.KIND_SCHOOL, key=obj.school,
+            ).values_list("title", flat=True).first()
+        return title or obj.school
+
+
+class PromptEditorshipInline(admin.TabularInline):
+    """Права редактирования промптов на странице пользователя (суперюзер).
+
+    Работает с implicit through-моделью ``Prompt.editors.through``: страница
+    аккаунта редактирует строки «кто какой чужой промпт может править».
+    ``fk_name="user"`` — точка монтирования со страницы пользователя. Сама
+    through-модель в ai_admin_site НЕ регистрируется.
+    """
+
+    model = Prompt.editors.through
+    fk_name = "user"
+    autocomplete_fields = ("prompt",)
+    extra = 0
+    classes = ("collapse",)
+    verbose_name = "Право на промпт"
+    verbose_name_plural = "Права редактирования промптов"
+
+
+class RestrictedUserAdmin(
+    FastChangelistAdminMixin, _StaffOnlyAdminMixin, UniversalUserSearchMixin, UserAdmin,
+):
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_users"
+
+    """User management restricted to staff/superuser in the AI admin site.
+
+    Права админки резолвятся ТОЛЬКО из «Групп доступа» (AIAccessGroup, M2M
+    ai_access_groups) — стоковые Django-группы («Группы») на права не
+    влияют вовсе и из формы убраны всегда (они вводили в заблуждение:
+    выдача там ничего не меняла). Поле «Группы доступа» редактируют
+    суперюзер / держатель page.groups (can_edit_access_groups), держателю
+    page.mgmt_users без page.groups оно показывается read-only. Gating —
+    в get_form/get_fieldsets/save_model: _StaffOnlyAdminMixin уже даёт
+    держателю ключа полный change, гвоздить право в has_*_permission
+    бесполезно.
+    """
+
+    list_display = ("last_name", "first_name", "dl_id", "email", "is_staff_badge")
+    list_display_links = ("dl_id",)
+    list_filter = ("is_staff", "is_superuser", "groups")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    # Логин/ФИО ищет универсальный миксин (user_search_self): id точно, ФИО в
+    # любом порядке, инициалы. Здесь остаётся только поле, которого миксин не
+    # знает, — email.
+    search_fields = ("email",)
+    # Сама модель — пользователь: id/ФИО в любом порядке/инициалы.
+    user_search_self = True
+    ordering = ("last_name", "first_name")
+
+    def get_form(self, request, obj=None, **kwargs):
+        # UserAdmin.get_form скармливает modelform_factory поля ИЗ ФИЛДСЕТОВ
+        # (flatten_fieldsets) — фабрика не знает ни имени-виртуалки
+        # ai_access_groups_display (это readonly-строка), ни, тем более,
+        # обратного M2M: вырезаем все три имени до фабрики и добавляем
+        # поле вручную после. ВАЖНО: _changeform_view ВСЕГДА передаёт
+        # fields=flatten_fieldsets(fieldsets) в get_form — фильтр обязан
+        # применяться и в этом случае (ветка «fields not in kwargs» не
+        # срабатывала никогда → FieldError «Unknown field(s)
+        # (ai_access_groups) specified for User» на странице пользователя).
+        if "fields" not in kwargs:
+            kwargs["fields"] = flatten_fieldsets(self.get_fieldsets(request, obj))
+        if kwargs["fields"]:
+            kwargs["fields"] = tuple(
+                f for f in kwargs["fields"]
+                if f not in ("groups", "ai_access_groups",
+                             "ai_access_groups_display")
+            )
+        form = super().get_form(request, obj, **kwargs)
+        # Стоковые «Группы» Django: система прав их не читает — убрать
+        # всегда (иначе держатель ключа снова «выдаст права», которые ни
+        # на что не влияют).
+        form.base_fields.pop("groups", None)
+        if can_edit_access_groups(request):
+            form.base_fields["ai_access_groups"] = forms.ModelMultipleChoiceField(
+                queryset=AIAccessGroup.objects.all(),
+                required=False,
+                widget=FilteredSelectMultiple("Группы доступа", is_stacked=False),
+                label="Группы доступа",
+                help_text="Права админки выдаются только этими группами "
+                          "(не стоковыми «Группами» Django).",
+            )
+            if obj is not None:
+                form.base_fields["ai_access_groups"].initial = (
+                    obj.ai_access_groups.all()
+                )
+        return form
+
+    def get_fieldsets(self, request, obj=None):
+        # UserAdmin.fieldsets — классовый атрибут: правим глубокую копию,
+        # иначе замена «groups» протекла бы в декларацию навсегда.
+        fieldsets = copy.deepcopy(super().get_fieldsets(request, obj))
+        editor = can_edit_access_groups(request)
+        for _, opts in fieldsets:
+            fields = opts.get("fields")
+            if not fields or "groups" not in fields:
+                continue
+            new_fields = list(fields)
+            # Редактор правит группы здесь; не-редактор — только смотрит
+            # (readonly через get_readonly_fields); на add-странице fieldsets
+            # групп не содержат вовсе (stock add_fieldsets).
+            new_fields[new_fields.index("groups")] = (
+                "ai_access_groups" if editor else "ai_access_groups_display"
+            )
+            opts["fields"] = tuple(new_fields)
+        return fieldsets
+
+    def get_readonly_fields(self, request, obj=None):
+        base = super().get_readonly_fields(request, obj)
+        if obj is not None and not can_edit_access_groups(request):
+            return tuple(base) + ("ai_access_groups_display",)
+        return base
+
+    def ai_access_groups_display(self, obj):
+        """Read-only строка «Группы доступа» для не-редакторов (mgmt_users)."""
+        names = [group.name for group in obj.ai_access_groups.all()]
+        return ", ".join(names) if names else "—"
+    ai_access_groups_display.short_description = "Группы доступа"
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # Декларативное M2M-поле ModelForm.save() не персистит — пишем
+        # вручную; в cleaned_data оно попадает только если поле было в
+        # форме (у не-редакторов его нет — подделать POST нельзя).
+        if "ai_access_groups" in form.cleaned_data:
+            obj.ai_access_groups.set(form.cleaned_data["ai_access_groups"])
+
+    def get_inlines(self, request, obj=None):
+        # Выдача прав на чужие промпты — только суперюзеру (зеркало правила
+        # «Доступ» fieldset в PromptAdmin).
+        if not is_superuser_user(request.user):
+            return super().get_inlines(request, obj)
+        return [*(super().get_inlines(request, obj) or []), PromptEditorshipInline]
+
+    def is_staff_badge(self, obj):
+        if obj.is_superuser:
+            return "🟣"
+        if obj.is_staff:
+            return "🔵"
+        return ""
+    is_staff_badge.short_description = "Роль"
+    is_staff_badge.admin_order_field = "is_staff"
+
+    def dl_id(self, obj):
+        """Display the DL user ID, stripping the 'user_' prefix."""
+        name = obj.username or ""
+        if name.startswith("user_"):
+            return name[5:]
+        return name
+    dl_id.short_description = "ID в dl.gsu.by"
+    dl_id.admin_order_field = "username"
+
+
+class TaskAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, admin.ModelAdmin):
+    """Admin for the local Task table used by batch-solve ARM.
+
+    The operator enters the DL ``node_id`` and assigns a topic / programming
+    language / ``file_extension`` locally. ``name``/``statement``/``task_id``
+    are DL-owned (fetched via ``refresh_from_dl``) and shown read-only.
+    """
+
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_dl_tasks"
+
+    list_display = ("node_id", "name", "topic", "programming_language", "file_extension", "active", "updated_at")
+    list_display_links = ("node_id", "name")
+    # topic и programming_language — отдельные колонки-FK: JOIN вместо двух
+    # запросов на строку.
+    list_select_related = ("topic", "topic__programming_language", "programming_language")
+    list_filter = ("active", "topic", "topic__programming_language")
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    list_editable = ("file_extension", "active")
+    search_fields = ("node_id", "task_id", "name", "statement")
+    autocomplete_fields = ("topic", "programming_language")
+    readonly_fields = ("name", "statement", "task_id", "created_at", "updated_at")
+    actions = ("refresh_from_dl",)
+
+    fieldsets = (
+        (None, {"fields": ("node_id", "task_id", "name", "statement")}),
+        ("Локальная привязка", {"fields": ("topic", "programming_language", "file_extension", "active")}),
+        ("Метаданные", {"fields": ("created_at", "updated_at")}),
+    )
+
+    def get_readonly_fields(self, request, obj=None):
+        # node_id is editable only on add; once set it identifies the DL task.
+        base = list(self.readonly_fields)
+        if obj is not None:
+            base.append("node_id")
+        return base
+
+    def response_change(self, request, obj):
+        """Возврат в список — на ту же страницу, с теми же фильтрами.
+
+        Django сохраняет только фильтры (``_changelist_filters``) и ВЫБРАСЫВАЕТ
+        номер страницы → после правки оператор оказывался на 1-й странице
+        списка («выкидывало наверх»). Номер страницы приходит в querystring
+        формы правки (``p``, его добавляет static/admin/ai/change_list/index.js)
+        — возвращаем весь исходный querystring.
+        """
+        response = super().response_change(request, obj)
+        if "_continue" in request.POST or "_addanother" in request.POST:
+            return response
+        query = request.GET.urlencode()
+        if not query:
+            return response
+        changelist_url = reverse(
+            "admin:ai_task_changelist", current_app=self.admin_site.name,
+        )
+        return HttpResponseRedirect(f"{changelist_url}?{query}")
+
+    def refresh_from_dl(self, request, queryset):
+        """Fetch name/statement/task_id from DL for the selected tasks.
+
+        Requires the admin's session to carry a valid DL session id (DLSID
+        flow), exactly like ``get_task_info_view``.
+        """
+        session_id = request.session.get("external_session_id", "").strip()
+        if not session_id:
+            session_id = resolve_dl_session_id(request)
+        if not session_id:
+            self.message_user(request, "Нет DLSID — обновление из DL невозможно.", level="ERROR")
+            return
+
+        updated = 0
+        failed = 0
+        for task in queryset:
+            try:
+                data = fetch_task_info(task.node_id, session_id=session_id, remove_html_tags=True)
+            except DLApiError as exc:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"DL #{task.node_id}: не удалось обновить ({exc}).",
+                    level="WARNING",
+                )
+                continue
+            apply_dl_task_info(task, data)
+            task.save(update_fields=["task_id", "name", "statement", "tree_path"])
+            updated += 1
+        self.message_user(request, f"Обновлено из DL: {updated}, ошибок: {failed}.")
+    refresh_from_dl.short_description = "Обновить название и условие из DL"
+
+
+class TaskSolutionAdmin(
+    FastChangelistAdminMixin, _StaffOnlyAdminMixin, UniversalUserSearchMixin, admin.ModelAdmin,
+):
+    """Кэш решённых задач «Реши задачу» (узел DL + язык → проверенный код).
+
+    Записи создаются автоматически (send-solution + успешное тестирование со
+    страницы «Реши задачу») и выдаются повторным запросам той же задачи без
+    вызова модели. Редактирование вручную не предусмотрено — только просмотр.
+
+    Список — кастомный (change_list_template): строка показывает дату,
+    название задачи со ссылкой в DL (с припиской — путь задачи в дереве
+    задач DL, TaskSolution.tree_path), имя языка, тему и промпт; клик по
+    строке (кроме ссылки на задачу) раскрывает сохранённый код.
+    """
+
+    # Ключ «Групп доступа» (page.mgmt_*), открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_task_solution"
+
+    change_list_template = "admin/ai/tasksolution_changelist.html"
+
+    # Без list_filter: в кэш попадают только решения, прошедшие тестирование
+    # (verdict=passed всегда); на странице нужны только поиск и пагинация.
+    search_fields = ("task_node_id", "external_user_id", "model_key", "topic_name", "prompt_name")
+    # В кэше пользователь хранится только DL-id: id и ФИО в любом порядке
+    # разрешаются через справочник User.
+    user_search_flat_fields = ("external_user_id",)
+    # Каждая строка несёт полный код решения — режем страницу.
+    list_per_page = 25
+    readonly_fields = ("task_node_id", "programming_language_id", "tree_path", "file_extension", "code", "verdict",
+                       "dl_comment", "model_key", "model_title", "topic_id", "topic_name",
+                       "prompt_id", "prompt_name", "queue_id", "test_log", "submitted_at",
+                       "created_by", "external_user_id", "times_used", "created_at", "updated_at")
+
+    fieldsets = (
+        (None, {"fields": ("task_node_id", "programming_language_id", "tree_path", "file_extension", "verdict")}),
+        ("Решение", {"fields": ("code", "dl_comment", "model_key", "model_title")}),
+        ("Контекст", {"fields": ("topic_id", "topic_name", "prompt_id", "prompt_name")}),
+        ("Метаданные", {"fields": ("queue_id", "test_log", "submitted_at", "created_by", "external_user_id", "times_used", "created_at", "updated_at")}),
+    )
+
+    def changelist_view(self, request, extra_context=None):
+        """Строки списка, подготовленные для отображения: название задачи
+        (один запрос Task по node_id страницы), имя языка вместо сырого id,
+        локализованная дата (МСК), ссылка на задачу в DL.
+
+        Шаблон admin/ai/tasksolution_changelist.html рендерит sol_rows;
+        поиск/фильтр/пагинация работают штатно через cl.
+        """
+        response = super().changelist_view(request, extra_context)
+        if response.status_code != 200 or not getattr(response, "context_data", None):
+            return response
+        solutions = list(response.context_data["cl"].result_list)
+        task_names = {
+            t.node_id: t.name
+            for t in Task.objects.filter(
+                node_id__in={s.task_node_id for s in solutions}
+            ).only("node_id", "name")
+        }
+        lang_names = {
+            lang.pk: lang.language_name
+            for lang in ProgrammingLanguage.objects.filter(
+                pk__in={s.programming_language_id for s in solutions if s.programming_language_id}
+            ).only("pk", "language_name")
+        }
+        rows = []
+        for s in solutions:
+            dt = s.submitted_at or s.created_at
+            rows.append({
+                "obj": s,
+                "date": timezone.localtime(dt).strftime("%d.%m.%Y %H:%M") if dt else "—",
+                "task_name": task_names.get(s.task_node_id) or f"Задача #{s.task_node_id}",
+                "task_url": dl_task_url(s.task_node_id, s.course_id) or "",
+                # Приписка — путь задачи в дереве задач DL (tree_path).
+                "tree_path": s.tree_path or "",
+                "lang_name": lang_names.get(s.programming_language_id) or (
+                    str(s.programming_language_id) if s.programming_language_id else "—"
+                ),
+                "topic_name": s.topic_name or "—",
+                "prompt_name": s.prompt_name or "—",
+                "user": s.external_user_id or "—",
+                "times_used": s.times_used,
+                "log_url": f"/ai/admin/ai/request_logs/{s.test_log_id}/" if s.test_log_id else "",
+            })
+        response.context_data["sol_rows"] = rows
+        return response
+
+    # Кэш пишется только автоматикой; ручное добавление/правка не предусмотрены.
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return is_superuser_user(request.user)
+
+
+class AIWizardSeenAdmin(
+    _StaffOnlyAdminMixin, UniversalUserSearchMixin, admin.ModelAdmin,
+):
+    """Кто какой онбординг-wizard уже видел и в какой версии.
+
+    Главная роль листинга — «отследить, получил ли пользователь тур» и сброс
+    отметки: удалить строку → тур этой страницы покажется заново при
+    следующем заходе.
+    """
+
+    # Ключ «Групп доступа», открывающий модуль не-staff участнику группы.
+    ACCESS_KEY = "page.mgmt_wizard_seen"
+
+    def _has_access(self, request):
+        # Листинг исторически супер-инструмент: staff-фолбэк НЕ добавляем —
+        # суперюзер либо держатель ключа.
+        return user_has_key(request.user, self.ACCESS_KEY)
+    list_display = ("user", "scope", "version", "created_at")
+    list_select_related = ("user",)
+    list_filter = ("scope",)
+    # «Show counts» — COUNT(*) на каждый вариант фильтра, тормозит загрузку списка.
+    show_facets = admin.ShowFacets.NEVER
+    # Штатные поля оставляем: без непустого search_fields Django вообще не
+    # рисует строку поиска. Универсальный миксин добавляет к ним id/ФИО в
+    # любом порядке и инициалы.
+    search_fields = ("user__username", "user__first_name", "user__last_name")
+    user_search_relations = ("user",)
+
+    def has_module_permission(self, request):
+        return is_superuser_user(request.user) or self._has_access(request)
+
+    def has_view_permission(self, request, obj=None):
+        return is_superuser_user(request.user) or self._has_access(request)
+
+    def has_add_permission(self, request):
+        return is_superuser_user(request.user)
+
+    def has_change_permission(self, request, obj=None):
+        return is_superuser_user(request.user)
+
+    # Удаление строки = сброс флага тура этого юзера → ключ открывает и его.
+    def has_delete_permission(self, request, obj=None):
+        return is_superuser_user(request.user) or self._has_access(request)

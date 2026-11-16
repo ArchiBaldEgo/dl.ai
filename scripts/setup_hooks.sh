@@ -1,5 +1,5 @@
 #!/bin/bash
-# Установка git hooks для проекта dl.ai.
+# Установка git hooks для проекта dlai.
 # Копирует post-merge (sync UpdateLog после git pull) и pre-push
 # (sync UpdateLog перед git push) в .git/hooks/.
 #

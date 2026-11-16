@@ -1,0 +1,321 @@
+"""
+Настройки Django для проекта DjangoTest (AI-приложение для dl.gsu.by).
+
+Содержит конфигурацию: БД (PostgreSQL), middleware, static files,
+channels (WebSocket), кэш (Redis), внешняя аутентификация через dl.gsu.by,
+rate limiting, CSRF, логирование.
+"""
+
+from pathlib import Path
+import os
+
+from dotenv import load_dotenv
+
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+# Режим запуска (прод/локально) определяется НАЛИЧИЕМ ПРОКСИ в окружении —
+# единое правило из ai/env_mode.py (есть прокси в .env → prod: DEBUG=0, куки
+# домена, проверка пулов; прокси пуст → локально: dev-удобства). Явные значения
+# в .env сильнее деривации: setdefault применяется до чтения конфигов ниже
+# (DEBUG, AI_* флаги), так что перекрыть деривацией заданное место не сможет.
+from ai.env_mode import apply_local_mode_defaults, is_local_mode  # noqa: E402
+apply_local_mode_defaults()
+
+
+# Quick-start development settings - unsuitable for production
+# See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
+
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = os.getenv("SECRET_KEY")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_USER = os.getenv("DB_USER")
+DB_NAME = os.getenv("DB_NAME", "dl_ai")
+DB_HOST = os.getenv("DB_HOST", "db")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_ENGINE = os.getenv("DB_ENGINE", "django.db.backends.postgresql")
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_csv(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+# SECURITY WARNING: don't run with debug turned on in production!
+# Явный непустой DEBUG в окружении всегда сильнее; пустой или незаданный — по
+# единому правилу «есть прокси → prod (False), нет прокси → локально (True)».
+_debug_raw = os.getenv("DEBUG", "").strip()
+if _debug_raw:
+    DEBUG = _debug_raw.lower() in {"1", "true", "yes", "y", "on"}
+else:
+    DEBUG = is_local_mode()
+
+ALLOWED_HOSTS = _env_csv(
+    "ALLOWED_HOSTS",
+    default=[
+        "dl.gsu.by",
+        "dlai.gsu.by",
+        "127.0.0.1",
+        "localhost",
+        "10.1.2.201",
+    ],
+)
+
+
+# Application definition
+
+INSTALLED_APPS = [
+    # 'daphne' должен стоять ПЕРВЫМ: его ASGI-runserver обслуживает WebSocket +
+    # static (DEBUG) и перекрывает WSGI-runserver от staticfiles (channels 4.x).
+    # Prod не затронут: Dockerfile CMD запускает daphne напрямую, минуя runserver.
+    'daphne',
+    # 'ai' должен идти ДО django.contrib.admin: иначе его собственный
+    # admin/base_site.html (тулбар «Инструменты ИИ» в {% block header %})
+    # затеняется стандартным шаблоном из site-packages при APP_DIRS=True.
+    'ai',
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+    'channels',
+    # postgres — нужен ради OpClass/GinIndex: его ready() регистрирует
+    # обёртки выражений в индексах (expression index на UPPER(col) с
+    # gin_trgm_ops — ускорение фильтра журнала по фамилии).
+    'django.contrib.postgres',
+]
+
+MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    # Сжатие больших HTML (админка, дневной отчёт, журнал). Стоит сразу после
+    # SecurityMiddleware и до всего, что читает/пишет body. Тестовый клиент не
+    # шлёт Accept-Encoding, поэтому тела ответов в тестах не меняются.
+    'django.middleware.gzip.GZipMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'ai.middleware.CsrfSessionFallbackMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'ai.throttling.RateLimitMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'ai.middleware.ExternalAuthMiddleware',
+]
+
+ROOT_URLCONF = 'DjangoTest.urls'
+
+TEMPLATES = [
+    {
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'DIRS': [],
+        'APP_DIRS': True,
+        'OPTIONS': {
+            'context_processors': [
+                'django.template.context_processors.debug',
+                'django.template.context_processors.request',
+                'django.contrib.auth.context_processors.auth',
+                'django.contrib.messages.context_processors.messages',
+            ],
+        },
+    },
+]
+
+WSGI_APPLICATION = 'DjangoTest.wsgi.application'
+
+ASGI_APPLICATION = 'DjangoTest.asgi.application'
+
+# Cache backend: Redis when REDIS_URL is set, otherwise LocMem for development.
+REDIS_URL = os.getenv("REDIS_URL", "")
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
+
+# Channels layer: Redis обязателен (prod — много воркеров; стек compose содержит
+# сервис redis). NOTE: channels_redis must be installed in the Docker image.
+# If the package is missing, fall back to InMemory to keep the app running.
+try:
+    import channels_redis  # noqa: F401
+    _CHANNELS_BACKEND = "channels_redis.core.RedisChannelLayer"
+    _CHANNELS_CONFIG = {"hosts": [REDIS_URL]} if REDIS_URL else {}
+except ImportError:
+    _CHANNELS_BACKEND = "channels.layers.InMemoryChannelLayer"
+    _CHANNELS_CONFIG = {}
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": _CHANNELS_BACKEND,
+        "CONFIG": _CHANNELS_CONFIG,
+    },
+}
+
+# Database
+# https://docs.djangoproject.com/en/5.1/ref/settings/#databases
+
+CSRF_TRUSTED_ORIGINS = _env_csv(
+    "CSRF_TRUSTED_ORIGINS",
+    default=[
+        "http://dl.gsu.by",
+        "https://dl.gsu.by",
+        "http://dlai.gsu.by",
+        "https://dlai.gsu.by",
+        "http://localhost",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://localhost:8080",
+        "http://127.0.0.1",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8000",
+        "http://127.0.0.1:8080",
+    ],
+)
+
+# Keep the standard csrftoken cookie name so AJAX can read and send X-CSRFToken.
+# The path still scopes the cookie to the /ai/ application by default.
+CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "csrftoken")
+SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "ai_sessionid")
+CSRF_COOKIE_PATH = os.getenv("CSRF_COOKIE_PATH", "/ai/")
+SESSION_COOKIE_PATH = os.getenv("SESSION_COOKIE_PATH", "/ai/")
+CSRF_COOKIE_DOMAIN = os.getenv("CSRF_COOKIE_DOMAIN") or None
+SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN") or None
+CSRF_COOKIE_HTTPONLY = _env_bool("CSRF_COOKIE_HTTPONLY", default=True)
+CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
+SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+CSRF_USE_SESSIONS = _env_bool("CSRF_USE_SESSIONS", default=False)
+
+# If you terminate TLS at a reverse proxy (nginx, etc.), enable this.
+if _env_bool("USE_X_FORWARDED_PROTO", default=not DEBUG):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    # In production with HTTPS, enable Secure flag on cookies
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_SECURE = True
+else:
+    # Development: allow insecure cookies
+    CSRF_COOKIE_SECURE = False
+    SESSION_COOKIE_SECURE = False
+DATABASES = {
+    'default': {
+        'ENGINE': DB_ENGINE,
+        'NAME': DB_NAME,
+        'USER': DB_USER,
+        'PASSWORD': DB_PASSWORD,
+        'HOST': DB_HOST,
+        'PORT': DB_PORT,
+        # Переиспользование соединений между запросами: без этого каждый
+        # запрос платит полный TCP/TLS-handshake до Postgres. 60 с — компромисс
+        # между выигрышем и количеством «спящих» коннектов; health-check не даёт
+        # упасть на соединении, убитом сервером/сетью.
+        'CONN_MAX_AGE': int(os.getenv("DB_CONN_MAX_AGE", "60")),
+        'CONN_HEALTH_CHECKS': True,
+    }
+}
+
+# --- Security headers (MEDIUM #9) ---
+if not DEBUG:
+    SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "31536000"))  # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_BROWSER_XSS_FILTER = True
+    X_FRAME_OPTIONS = "DENY"
+    SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", default=True)
+    SECURE_REDIRECT_EXEMPT = [r"^health$"]
+    SECURE_REFERRER_POLICY = "same-origin"
+else:
+    X_FRAME_OPTIONS = "DENY"
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# --- Session security (LOW #14, #15) ---
+SESSION_COOKIE_AGE = int(os.getenv("SESSION_COOKIE_AGE", str(60 * 60 * 8)))  # 8 hours
+SESSION_EXPIRE_AT_BROWSER_CLOSE = _env_bool("SESSION_EXPIRE_AT_BROWSER_CLOSE", default=True)
+
+
+
+# Password validation
+# https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
+
+AUTH_PASSWORD_VALIDATORS = [
+    {
+        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        'OPTIONS': {'min_length': 8},
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+    },
+]
+
+AUTHENTICATION_BACKENDS = [
+    'ai.auth_backends.AdminExternalAuthBackend',
+    'django.contrib.auth.backends.ModelBackend',
+]
+
+
+# Internationalization
+# https://docs.djangoproject.com/en/5.1/topics/i18n/
+
+LANGUAGE_CODE = 'en-us'
+
+TIME_ZONE = 'UTC'
+
+USE_I18N = True
+
+USE_TZ = True
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Serve static URLs through the app-level asset endpoint.
+# This avoids dependency on outer reverse-proxy static mappings.
+STATIC_URL = '/ai/assets/'
+
+# Include project-level static assets (chat_template.css, decide_task.css, etc.)
+# so `collectstatic` copies them into STATIC_ROOT in production.
+STATICFILES_DIRS = [
+    BASE_DIR / 'src/web/static',
+]
+
+STATIC_ROOT = "/app/staticfiles/"
+
+# Rate limiting settings (requests per window_seconds).
+AI_RATE_LIMIT_ENABLED = _env_bool("AI_RATE_LIMIT_ENABLED", default=True)
+AI_WS_RATE_LIMIT = int(os.getenv("AI_WS_RATE_LIMIT", "120"))
+AI_HTTP_RATE_LIMIT = int(os.getenv("AI_HTTP_RATE_LIMIT", "60"))
+AI_RATE_LIMIT_WINDOW = int(os.getenv("AI_RATE_LIMIT_WINDOW", "60"))
+
+# When Web DeepSeek is detected as down, restart the WebPools/ deepseek site and re-check once.
+AI_WEB_DEEPSEEK_AUTORECOVERY = _env_bool("AI_WEB_DEEPSEEK_AUTORECOVERY", default=True)
+
+# When Web Kimi is detected as down, restart the WebPools/ kimi site and re-check once.
+AI_WEB_KIMI_AUTORECOVERY = _env_bool("AI_WEB_KIMI_AUTORECOVERY", default=True)
+
+# Provider gates (default off = current behaviour: providers disabled).
+# When True, the SambaNova / Groq model entries are imported and registered.
+AI_ENABLE_SAMBANOVA = _env_bool("AI_ENABLE_SAMBANOVA", default=False)
+AI_ENABLE_GROQ = _env_bool("AI_ENABLE_GROQ", default=False)
+

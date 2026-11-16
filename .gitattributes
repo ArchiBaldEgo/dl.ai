@@ -1,3 +1,4 @@
+# .gitattributes
 # Normalize all text files to LF in the repo, regardless of checkout OS.
 # Prevents CRLF/LF churn when mixing Windows git.exe (autocrlf=true) and WSL git.
 # gitattributes takes precedence over core.autocrlf, so Windows git.exe will also

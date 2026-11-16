@@ -1,0 +1,6 @@
+[project]
+name = "dl.ai"  # Имя вашего проекта
+version = "0.0.0"
+description = "Приложение для dl.gsu.by с ИИ, заточенное для обучении студентов/школьников"
+requires-python = "3.12"
+dependencies = []

@@ -1,0 +1,1 @@
+docker compose -f configs/docker-compose.yml --env-file configs/.env $@

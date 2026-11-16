@@ -1,0 +1,129 @@
+# configs/docker-compose.yml
+name: dlai
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: configs/Dockerfile
+      args:
+        # Keep apt/pip on direct connection (HTTP_PROXY/HTTPS_PROXY are empty in .env).
+        HTTP_PROXY: "${HTTP_PROXY:-}"
+        HTTPS_PROXY: "${HTTPS_PROXY:-}"
+        NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,db,nginx,.local}"
+        # Puppeteer Chromium download needs the real corporate proxy.
+        NPM_HTTP_PROXY: "${RUNTIME_HTTP_PROXY:-}"
+        NPM_HTTPS_PROXY: "${RUNTIME_HTTPS_PROXY:-}"
+    container_name: dl_ai_web
+    restart: unless-stopped
+    # Chrome-боты Kimi k3-эры: idle-рендерер kimi.com ~0.7-1.0ГБ, на генерации +0.4-0.6ГБ
+    # (жёсткое доказательство: 2g-LIMit ронял рендерер cgroup-OOM'ом на КАЖДОЙ отправке —
+    # «Page crashed!» в worker/logs/application.log). 3.5g хватает на одновременные
+    # генерации web Kimi + web DeepSeek; хост имеет 6.4ГБ (4.4ГБ доступно).
+    shm_size: 512m
+    mem_limit: 3.5g
+    memswap_limit: 3.5g
+    oom_kill_disable: false
+    volumes:
+      - ..:/app
+      - static_volume:/app/staticfiles
+      # Один общий node_modules (в корне репозитория) на оба бот-пула и на
+      # WebKimi/seed.js — раньше были два (WebDeepseek/ + WebKimi/) с
+      # идентичным набором зависимостей.
+      - WebPools_node_modules:/app/node_modules
+#      - WebPools_puppeteer_cache:/app/.puppeteer-cache
+      # Chrome для Puppeteer в ЛОКАЛЬНОЙ сборке не качается (install.js без
+      # прокси висит навсегда — см. Dockerfile), поэтому /opt/puppeteer-runtime
+      # в образе пуст и оба бот-пула падают на «Could not find Chrome». Отдаём
+      # кэш Chrome 115 хоста (~/.cache/puppeteer, путь как у npx puppeteer по
+      # умолчанию) как READ-ONLY источник: CMD локального режима копирует его
+      # в /opt/puppeteer-runtime на старте, если в образе Chrome нет. На проде
+      # каталог на хосте — пустая заглушка от compose, chrome в образе есть,
+      # копия не происходит.
+      - ${HOME:-/root}/.cache/puppeteer:/host-puppeteer-cache:ro
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    # NOTE: WebDeepseek/.env no longer exists — all bot vars (PORT, MAX_BOT_COUNT,
+    # BOT_USERNAME/BOT_PASSWORD, BOT_PROXY*, etc.) now live in the root .env.
+    # Do NOT remap PUPPETEER_PROXY_* -> BOT_PROXY* via `environment:` here.
+    # `environment:` overrides `env_file:`, so an explicit mapping with an empty
+    # fallback ("${PUPPETEER_PROXY_SERVER:-}") wipes BOT_PROXY* from ai.env,
+    # leaving the browser with NO proxy -> login can't reach chat.deepseek.com
+    # -> 401 not_autorized. WebPools/worker/bot.js resolveProxy() already
+    # falls back to PUPPETEER_PROXY_* when BOT_PROXY is empty, so both naming
+    # schemes work without any mapping here.
+    # Пулы без сидирования (Kimi требует ручного seed-логина) держат контейнер
+    # вечно unhealthy, поэтому проверка пулов гейтится: явный
+    # AI_POOL_HEALTHCHECK_DISABLED=1 ИЛИ локальный режим по единому правилу
+    # «нет прокси в окружении → локально» (ai/env_mode.py) — тогда проверяется
+    # только Daphne. С прокси (prod) и без флага — прежняя проверка байт-в-байт.
+    healthcheck:
+      test: ["CMD-SHELL", "if [ \"$$AI_POOL_HEALTHCHECK_DISABLED\" = \"1\" ] || { [ -z \"$$HTTP_PROXY\" ] && [ -z \"$$HTTPS_PROXY\" ]; }; then curl -fsS http://localhost:8000/health >/dev/null; else curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); k=json.load(urllib.request.urlopen('http://localhost:3001/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 and k.get('ok') else 1)\"; fi"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    depends_on:
+      - db
+      - redis
+    networks:
+      - shared-network
+
+  db:
+    image: postgres:14
+    container_name: dl_ai_db
+    # Без restart-политики db не поднимался следом за остальными после
+    # перезагрузки WSL/хоста — web из-за этого циклился на migrate-retry.
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: "${DB_USER:-dlaibd}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-dlaibd}"
+      POSTGRES_DB: "${DB_NAME:-dl_ai}"
+    networks:
+      - shared-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: dl_ai_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - shared-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  nginx:
+    image: nginx:latest
+    container_name: dl_ai_nginx
+    restart: unless-stopped
+    ports:
+      - "${AI_NGINX_BIND:-0.0.0.0}:${AI_NGINX_PORT:-8080}:80"
+    volumes:
+      - ./nginx:/etc/nginx/conf.d
+      - static_volume:/app/staticfiles
+    depends_on:
+      - web
+    networks:
+      - shared-network
+
+
+volumes:
+  postgres_data:
+    name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}"
+  redis_data:
+    name: "${REDIS_VOLUME_NAME:-dlai_redis_data}"
+  static_volume:
+  WebPools_node_modules:
+  WebPools_puppeteer_cache:
+
+networks:
+  shared-network:
+    name: "${DOCKER_NETWORK_NAME:-dlai-network}"
