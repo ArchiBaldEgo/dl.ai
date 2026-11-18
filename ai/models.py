@@ -1878,7 +1878,7 @@ class AuthorAlias(models.Model):
     nick = models.CharField(max_length=255, unique=True, verbose_name="Ник в git")
     full_name = models.CharField(max_length=255, verbose_name="ФИО")
     group = models.CharField(max_length=255, blank=True, default="", verbose_name="Группа")
-
+    
     class Meta:
         db_table = "ai_author_alias"
         verbose_name = "Автор коммитов (справочник)"
@@ -2177,3 +2177,27 @@ class AIDLApiRequest(models.Model):
     def __str__(self) -> str:
         who = self.user_full_name or self.username or self.external_user_id or "—"
         return f"{who}: {self.description[:60]}"
+
+
+# ФИО -> Email
+class UserToEmailDictionary(models.Model):
+    """Справочник: ФИО разработчика → email."""
+
+    user = models.CharField(
+        max_length=100,
+        unique=True,
+        verbose_name="ФИО Разработчика",
+    )
+    email = models.EmailField(
+        max_length=100,
+        verbose_name="Email",
+    )
+
+    class Meta:
+        db_table = "ai_user_to_email"
+        verbose_name = "Соответствие ФИО → Email"
+        verbose_name_plural = "Соответствия ФИО → Email"
+        ordering = ("user",)
+
+    def __str__(self):
+        return f"{self.user} [{self.email}]"

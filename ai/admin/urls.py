@@ -7,6 +7,9 @@
 
 from django.urls import include, path
 
+import ai.admin.emails.reg as emails
+import ai.admin.emails.view as emails_view
+
 from ..views import set_password_view
 from .access_groups import (
     admin_access_group_delete_view,
@@ -199,11 +202,16 @@ def get_ai_admin_urls():
         path("dl-api-requests/", ai_admin_site.admin_view(admin_dl_api_requests_view), name="ai_dl_api_requests"),
         path("dl-api-requests/create/", ai_admin_site.admin_view(admin_dl_api_request_create_view), name="ai_dl_api_request_create"),
         path("dl-api-requests/update/", ai_admin_site.admin_view(admin_dl_api_request_update_view), name="ai_dl_api_request_update"),
-
+        
+        # Тестовые данные
+        path("test_data/",
+             ai_admin_site.admin_view(test_data_view), name="ai_test_data"),
         path("test_data/emit_request/",
              ai_admin_site.admin_view(test_data_emit_request_view),name="ai_test_data_emit_request"),
-        path("test_data/",
-             ai_admin_site.admin_view(test_data_view), name="ai_test_data")
+        
+        # Emails
+        path(emails.url(),
+             ai_admin_site.admin_view(emails_view.view), name="ai_emails")
     ]
     return [
         *custom_urls,
