@@ -1,3 +1,4 @@
+/* static/admin/css/ai-wizard.css */
 /* ==========================================================================
    ai-wizard.css — стили онбординг-тура (static/admin/js/ai-wizard.js).
 
@@ -255,4 +256,10 @@
     .ai-wizard-popover--enter {
         animation: none;
     }
+}
+
+#ai-wizard-restart {
+  background: transparent;
+  border-color: var(--aiwiz-border);
+  color: var(--aiwiz-fg);
 }

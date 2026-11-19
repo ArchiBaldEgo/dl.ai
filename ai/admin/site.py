@@ -16,6 +16,8 @@ from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils.http import urlencode
 
+import ai.admin.emails.reg as emails
+
 from .permissions import (
     can_access_access_groups,
     can_access_admin,
@@ -589,6 +591,8 @@ class AIAdminSite(admin.AdminSite):
             # «Группы доступа» — суперюзеру, либо держателю ключа page.groups
             # (он управляет правами групп, включая собственную).
             ("Система", "Группы доступа", "AiAccessGroups", "/ai/admin/ai-groups/", show_groups, "⛭", "Группы доступа: права страниц, действия, состав", "page.groups", ()),
+            
+            ("Система", "Emails", "AiEmails", emails.full_url(), emails.can_access(request), "@", emails.DESCRIPTION, emails.PAGE)
         ]
 
     @staticmethod
@@ -686,12 +690,12 @@ class AIAdminSite(admin.AdminSite):
         # admin/app_list.html не рисует для неё title).
         group_order = ["Закреплено", "Промпты", "Документация", "ARM", "Диагностика", "Система"]
         label_to_key = {
-            "Закреплено": "ai-pinned",
-            "Промпты": "ai-tools-prompts",
+            "Закреплено":   "ai-pinned",
+            "Промпты":      "ai-tools-prompts",
             "Документация": "ai-docs",
-            "ARM": "ai-tools-arm",
-            "Диагностика": "ai-tools-diag",
-            "Система": "ai-tools-system",
+            "ARM":          "ai-tools-arm",
+            "Диагностика":  "ai-tools-diag",
+            "Система":      "ai-tools-system",
         }
         groups: dict[str, dict] = {}
         for tool in tools:

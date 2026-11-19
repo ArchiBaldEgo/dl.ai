@@ -1,0 +1,5 @@
+1. Объединить doc и docs
+2. Убрать mail_bridge.py
+3. Поместить backup_runner.sh в scripts
+4. DOCX.md в docs
+5. dl-rest-api.json в docs и сделать dl-rest-api.md

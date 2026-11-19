@@ -1,0 +1,35 @@
+{% if rows %}
+  <table class="ai-logs-table">
+    <thead>
+      <tr>
+        <th style="width:3em">#</th>
+        <th>ФИО</th>
+        <th>Email</th>
+        <th style="width:5em"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr>
+          <td>{{ forloop.counter }}</td>
+          <td>{{ row.user }}</td>
+          <td><a href="mailto:{{ row.email }}">{{ row.email }}</a></td>
+          <td>
+            {# Удаление — отдельной POST-формой с _method, см. ниже #}
+            <form method="post" action="{{ request.path }}" style="display:inline">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="delete">
+              <input type="hidden" name="pk" value="{{ row.pk }}">
+              <button type="submit" class="button"
+                      onclick="return confirm('Удалить {{ row.user|escapejs }}?');">
+                Удалить
+              </button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <p class="ai-logs-empty">Справочник пуст{% if filters.q %} по запросу «{{ filters.q }}»{% endif %}.</p>
+{% endif %}

@@ -1,0 +1,48 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+{% load static %}
+<div class="ai-logs-wrap">
+  {% include "admin/ai/_ai_back_nav.html" %}
+
+  {# Сообщения рендерит admin/base.html в {% block messages %}, дублировать не нужно. #}
+
+  {# ---------- POST: добавление записи ---------- #}
+  <form method="post" class="ai-logs-filters">
+    {% csrf_token %}
+    <div class="filter-field">
+      <label for="id_user">{{ form.user.label }}</label>
+      {{ form.user }}
+      {% if form.user.errors %}
+        <span class="ai-form-error">{{ form.user.errors|join:", " }}</span>
+      {% endif %}
+    </div>
+    <div class="filter-field">
+      <label for="id_email">{{ form.email.label }}</label>
+      {{ form.email }}
+      {% if form.email.errors %}
+        <span class="ai-form-error">{{ form.email.errors|join:", " }}</span>
+      {% endif %}
+    </div>
+    <div class="ai-logs-actions">
+      <button type="submit" class="button">Добавить</button>
+    </div>
+  </form>
+
+  {# ---------- GET: поиск ---------- #}
+  <form method="get" class="ai-logs-filters">
+    <div class="filter-field">
+      <label for="id_q">Поиск</label>
+      <input id="id_q" type="text" name="q" value="{{ filters.q }}"
+             placeholder="ФИО или email">
+    </div>
+    <div class="ai-logs-actions">
+      <button type="submit" class="button">Найти</button>
+      <a class="button" href="{{ request.path }}">Сбросить</a>
+    </div>
+  </form>
+
+  {% include "admin/ai/emails_table.html" %}
+</div>
+
+{% endblock %}
