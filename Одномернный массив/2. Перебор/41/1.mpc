@@ -1,0 +1,18 @@
+char x [10];
+
+unsigned __out __bits(8) res;
+
+void main(){
+int sum_positive = 0;
+int sum_modulus = 0;
+for (int i = 0; i < 10; i++) {
+if (x[i] > 0) {
+sum_positive += x[i];
+} else if (x[i] < 0) {
+sum_modulus += -x[i]; }
+}
+
+if (sum_modulus != 0) {
+int res = sum_positive % sum_modulus;
+}
+}

@@ -1,0 +1,68 @@
+unsigned __in __bits(8)b0;
+unsigned __in __bits(8)b1;
+unsigned __in __bits(8)b2;
+unsigned __in __bits(8)b3;
+unsigned __in __bits(8)b4;
+unsigned __in __bits(8)b5;
+unsigned __in __bits(8)b6;
+unsigned __in __bits(8)b7;
+unsigned __in __bits(8)b8;
+unsigned __in __bits(8)b9;
+unsigned __in __bits(8)b10;
+unsigned __in __bits(8)b11;
+unsigned __in __bits(8)b12;
+unsigned __in __bits(8)b13;
+unsigned __in __bits(8)b14;
+unsigned __in __bits(8)b15;
+unsigned __in __bits(8)b16;
+unsigned __in __bits(8)b17;
+unsigned __in __bits(8)b18;
+unsigned __in __bits(8)b19;
+
+unsigned __out __bits(8)kol;
+
+void main(){
+unsigned __bits(8)k=0;
+if (b0<4){
+k++;
+} else if(b1<4){
+k++;
+} else if(b2<4){
+k++;
+} else if(b3<4){
+k++;
+} else if(b4<4){
+k++;
+} else if(b5<4){
+k++;
+} else if(b6<4){
+k++;
+} else if(b7<4){
+k++;
+} else if(b8<4){
+k++;
+} else if(b9<4){
+k++;
+} else if(b10<4){
+k++;
+} else if(b11<4){
+k++;
+} else if(b12<4){
+k++;
+} else if(b13<4){
+k++;
+} else if(b14<4){
+k++;
+} else if(b15<4){
+k++;
+} else if(b16<4){
+k++;
+} else if(b17<4){
+k++;
+} else if(b18<4){
+k++;
+} else if(b19<4){
+k++;
+}
+kol = k;
+}

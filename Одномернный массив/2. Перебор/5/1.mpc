@@ -1,0 +1,14 @@
+int __in __bits(8) a;
+int __in __bits(8) b;
+
+int __out __bits(8) y;
+
+void main()
+{
+if (a < b) {
+y = 10;
+}
+else {
+y = 5;
+}
+}

@@ -1,0 +1,20 @@
+int __bits(8) mas[10];
+int __bits(8) minval;
+int __bits(8) maxval;
+int __bits(8) sr_ar;
+
+void main() {
+minval = 255;
+maxval = 0;
+
+for (int i = 0; i < 10; i++) {
+if (mas[i] < minval) {
+minval = mas[i];
+}
+if (mas[i] > maxval) {
+maxval = mas[i];
+}
+}
+
+sr_ar = (minval + maxval) / 2;
+}

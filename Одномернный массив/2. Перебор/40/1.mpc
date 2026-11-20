@@ -1,0 +1,20 @@
+unsigned char mas[10];
+unsigned char sr_ar;
+
+void main()
+{
+unsigned char min_val = mas[0];
+unsigned char max_val = mas[0];
+int i;
+
+for (i = 1; i < 10; i++) {
+if (mas[i] < min_val) {
+min_val = mas[i];
+}
+if (mas[i] > max_val) {
+max_val = mas[i];
+}
+}
+
+sr_ar = (min_val + max_val) / 2;
+}

@@ -1,0 +1,14 @@
+int __bits(8) a[10];
+
+int __out __bits(8) res;
+
+void main()
+{
+int __bits(8) i;
+int __bits(32) s1;
+int __bits(32) s2;
+for (i=0; i<10; i++)
+if (a[i]>=0) s1 += a[i];
+else s2 += -a[i];
+res = s1%s2;
+}

@@ -1,0 +1,10 @@
+unsigned b[20];
+
+unsigned __out __bits(8) kol;
+void main()
+{
+unsigned __bits(8) number=0;
+unsigned i;
+for (i=0;i<20;i++) if (b[i]<4) number++;
+kol=number;
+}

@@ -1,0 +1,19 @@
+int __in __bits(8) b;
+int __out __bits(8) kol;
+
+void main() {
+int count = 0;
+int i = 0;
+int current_grade;
+
+// ¦¨õôÿşûğóğõü, ¢ªş ¸ø¸ªõüğ ÿş¸ûõôşòğªõû¹ış ÿşôğõª 20 ş¡õışú ¢õ¨õ÷ ÿõ¨õüõııº¦ b
+for (i = 0; i < 20; i = i + 1) {
+current_grade = b; // ¢øªğõü ªõúº•º¦ ş¡õıúº
+if (current_grade < 4) {
+count = count + 1;
+}
+// Tø¸ªõüğ ğòªşüğªø¢õ¸úø ÿõ¨õ¿şôøª ú ¸ûõôº¦•õù ş¡õıúõ
+}
+
+kol = count;
+}

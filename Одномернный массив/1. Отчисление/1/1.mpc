@@ -1,0 +1,13 @@
+int __bits(8) b[20];
+unsigned __out __bits(8) kol;
+
+void main() {
+unsigned __bits(8) k = 0;
+
+for (unsigned __bits(8) i = 0; i < 10; i++) {
+if (b[i] < 4) {
+k++;
+}
+}
+kol = k;
+}
