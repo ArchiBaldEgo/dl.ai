@@ -24,4 +24,9 @@ class Migration(migrations.Migration):
                     'ordering': ('user',),
                 },
             ),
+            migrations.AlterField(
+                model_name='authoralias',
+                name='email',
+                field=models.CharField(blank=True, default='', max_length=100, verbose_name='Email'),
+            ),
         ]

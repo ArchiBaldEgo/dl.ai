@@ -432,6 +432,7 @@ def admin_task_create_view(request):
             status=409,
         )
 
+
     return JsonResponse({"ok": True, "id": task.pk})
 
 
@@ -708,7 +709,7 @@ def admin_task_assign_view(request, task_id):
     MSG_SUBJECT = "Вам выдали задачу"
     MSG_BODY =f"""{_claimant_display(assignee)}, {display_name_for_user(request.user)} поручил вам задачу.
     Зайдите на dl.gsu.by/ai/tasks чтобы посмотреть."""
-    send_email_message_dl([email], MSG_SUBJECT, MSG_BODY)
+    send_email_message_dl(email, MSG_SUBJECT, MSG_BODY)
         
     return JsonResponse({
         "ok": True,

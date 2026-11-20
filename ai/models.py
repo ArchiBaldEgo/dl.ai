@@ -1945,6 +1945,8 @@ class DLEducationName(models.Model):
         return f"{self.title} [{self.key}]"
 
 
+
+# Здесь журнал
 class UpdateLog(models.Model):
     """Журнал обновлений проекта.
 
