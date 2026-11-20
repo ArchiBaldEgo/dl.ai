@@ -1,0 +1,40 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<form action="{% url 'ai_check_ai' %}" method="post" enctype="multipart/form-data">
+  {% csrf_token %}
+  <fieldset class="module aligned">
+    <p class="help">Вставьте текст или выберите файл. Содержимое будет отправлено в Pangram.</p>
+    {{ form.non_field_errors }}
+    {% for field in form %}
+      <div class="form-row">
+        {{ field.errors }}
+        {{ field.label_tag }}
+        {{ field }}
+        {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+      </div>
+    {% endfor %}
+  </fieldset>
+  <div class="submit-row">
+    <input type="submit" class="default" value="Проверить">
+  </div>
+</form>
+
+{% if error %}
+  <p class="errornote" role="alert">{{ error }}</p>
+{% endif %}
+
+{% if result %}
+  <section class="module" aria-labelledby="check-ai-result">
+    <h2 id="check-ai-result">Результат Pangram</h2>
+    <dl>
+      <dt>Сгенерировано ИИ</dt>
+      <dd>{{ result.ai_percent }}%</dd>
+      <dt>Написано с помощью ИИ</dt>
+      <dd>{{ result.ai_assisted_percent }}%</dd>
+      <dt>Написано человеком</dt>
+      <dd>{{ result.human_percent }}%</dd>
+    </dl>
+  </section>
+{% endif %}
+{% endblock %}

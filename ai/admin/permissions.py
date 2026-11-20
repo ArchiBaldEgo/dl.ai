@@ -442,6 +442,16 @@ def can_access_prompt_lab(request):
     )
 
 
+def can_access_check_ai(request):
+    """Проверка решений: суперпользователь или право page.check_ai."""
+    user = request.user
+    return (
+        user.is_authenticated
+        and user.is_active
+        and user_has_key(user, "page.check_ai")
+    )
+
+
 def can_access_test_data(request):
     """«Тестовые данные»: суперюзер ИЛИ ключ page.test_data.
 
