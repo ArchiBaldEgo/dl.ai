@@ -1,5 +1,8 @@
 services:
+  # Основной сервис 
   web:
+    container_name: dl_ai_web
+    
     build:
       context: .
       dockerfile: Dockerfile
@@ -11,7 +14,6 @@ services:
         # Puppeteer Chromium download needs the real corporate proxy.
         NPM_HTTP_PROXY: "${RUNTIME_HTTP_PROXY:-}"
         NPM_HTTPS_PROXY: "${RUNTIME_HTTPS_PROXY:-}"
-    container_name: dl_ai_web
     restart: unless-stopped
     # Chrome-боты Kimi k3-эры: idle-рендерер kimi.com ~0.7-1.0ГБ, на генерации +0.4-0.6ГБ
     # (жёсткое доказательство: 2g-LIMit ронял рендерер cgroup-OOM'ом на КАЖДОЙ отправке —
@@ -28,7 +30,7 @@ services:
       # WebKimi/seed.js — раньше были два (WebDeepseek/ + WebKimi/) с
       # идентичным набором зависимостей.
       - WebPools_node_modules:/app/node_modules
-#      - WebPools_puppeteer_cache:/app/.puppeteer-cache
+      # - WebPools_puppeteer_cache:/app/.puppeteer-cache
       # Chrome для Puppeteer в ЛОКАЛЬНОЙ сборке не качается (install.js без
       # прокси висит навсегда — см. Dockerfile), поэтому /opt/puppeteer-runtime
       # в образе пуст и оба бот-пула падают на «Could not find Chrome». Отдаём
@@ -68,6 +70,15 @@ services:
     networks:
       - shared-network
 
+  # Планировщик под самим основным сервисом
+  scheduler:
+    build: .
+    container_name: dl_ai_web_scheduler
+    command: python manage.py scheduler
+    env_file: [.env]
+    depends_on: [db, redis]
+    restart: unless-stopped
+    networks: [shared-network]
   db:
     image: postgres:14
     container_name: dl_ai_db

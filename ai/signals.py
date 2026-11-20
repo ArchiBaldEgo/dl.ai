@@ -129,6 +129,15 @@ def _invalidate_last_update_date_cache(sender, **kwargs):
     cache.delete(UPDATE_AUTHORS_CACHE_KEY)
 
 
+# Запускается когда в дб добавляется новый UpdateLog
+@receiver(post_save, sender=UpdateLog)
+def _on_new_update_log(sender, instance, created, **kwargs):
+    if not created:
+        return
+    
+    from ai.admin.emails.funcs import send_update_log_email 
+    send_update_log_email(instance)
+
 @receiver(post_save, sender=AIModelAvailability)
 @receiver(post_delete, sender=AIModelAvailability)
 def _invalidate_available_models_cache(sender, **kwargs):

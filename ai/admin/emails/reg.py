@@ -7,6 +7,7 @@ from ai.admin.permissions import is_superuser_user, user_has_key
 
 DESCRIPTION = "Emails: создание и редактирование таблицы email для разработчиков"
 PAGE = "page.emails"
+TITLE = "Справочник Emails / "
  
 # Отдаёт путь до странички
 def full_url() -> str:
