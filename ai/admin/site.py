@@ -22,6 +22,7 @@ from .permissions import (
     can_access_access_groups,
     can_access_admin,
     can_access_arm,
+    can_access_check_ai,
     can_access_dl_api_requests,
     can_access_logs,
     can_access_model_status,
@@ -570,6 +571,9 @@ class AIAdminSite(admin.AdminSite):
             ("Диагностика", "Тестовая консоль", "AiTestConsole", "/ai/admin/test-console/", show_test_console, "⌘", "Запуск набора тестов приложения", "page.test_console", (
                 ("action.test_console_run", "Запускать прогоны"),
             )),
+            ("Диагностика", "Check AI", "AiCheckAi", "/ai/admin/check-ai/",
+             can_access_check_ai(request), "✓", "Проверка решений через Pangram",
+             "page.check_ai", ()),
             ("Диагностика",
              "Тестовые данные",
              "AiTestData",
