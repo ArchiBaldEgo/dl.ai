@@ -1,7 +1,19 @@
 {% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=4">
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/ai/check_ai/textarea.js' %}" defer></script>
+{% endblock %}
 
 {% block content %}
-<form action="{% url 'ai_check_ai' %}" method="post" enctype="multipart/form-data">
+<form id="check-ai-form" data-user-id="{{ request.user.pk|stringformat:'s' }}"
+      action="{% url 'ai_check_ai' %}" method="post" enctype="multipart/form-data">
   {% csrf_token %}
   <fieldset class="module aligned">
     <p class="help">Вставьте текст или выберите файл. Содержимое будет отправлено в Pangram.</p>
@@ -16,7 +28,7 @@
     {% endfor %}
   </fieldset>
   <div class="submit-row">
-    <input type="submit" class="default" value="Проверить">
+    <input id="check-ai-submit" type="submit" class="default" value="Проверить">
   </div>
 </form>
 

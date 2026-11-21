@@ -8,6 +8,7 @@ from django.http import HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
 from django.views.decorators.http import require_http_methods
 
+from ..constants import CHECK_AI_TITLE
 from ..services.pangram_client import PangramError, check_text
 from .permissions import can_access_check_ai
 from .site import ai_admin_site
@@ -37,12 +38,10 @@ class CheckAiForm(forms.Form):
         label="Текст решения",
         required=False,
         strip=False,
-        widget=forms.Textarea(attrs={
-    "style": (
-        "display: block; clear: both; width: 100%; box-sizing: border-box; "
-        "height: 55vh; resize: vertical;"
-    ),
-}),
+        widget=forms.Textarea(attrs={"rows": 6}),
+        error_messages={
+            "null_characters_not_allowed": "Текст содержит недопустимый нулевой символ.",
+        },
     )
     file = forms.FileField(
         label="Файл решения",
@@ -51,6 +50,13 @@ class CheckAiForm(forms.Form):
             f"Текстовый файл или исходный код до {MAX_INPUT_LABEL}. "
             "Поддерживаются UTF-8, Windows-1251, а также UTF-16 и UTF-32 с меткой кодировки."
         ),
+        error_messages={
+            "empty": "Загруженный файл пуст.",
+            "invalid": "Не удалось принять файл. Выберите файл заново.",
+            "missing": "Файл не удалось получить. Выберите его заново.",
+            "contradiction": "Выберите один файл для проверки.",
+            "max_length": "Имя файла слишком длинное.",
+        },
     )
 
     def clean(self):
@@ -87,7 +93,7 @@ class CheckAiForm(forms.Form):
 @require_http_methods(["GET", "POST"])
 def admin_check_ai_view(request):
     if not can_access_check_ai(request):
-        return HttpResponseForbidden("Нет доступа к Check AI.")
+        return HttpResponseForbidden("У вас нет доступа к проверке на ИИ.")
 
     form = CheckAiForm()
     status = 200
@@ -118,7 +124,7 @@ def admin_check_ai_view(request):
         "admin/ai/check_ai.html",
         {
             **ai_admin_site.each_context(request),
-            "title": "Check AI",
+            "title": CHECK_AI_TITLE,
             "form": form,
             "result": result,
             "error": error,

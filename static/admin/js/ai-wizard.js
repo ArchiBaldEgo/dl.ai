@@ -516,6 +516,12 @@
         admin_dl_api_requests: [
             { sel: ".ai-dlapi-tabs", title: "Две вкладки", text: "«Актуальные» — заявки, по которым API ещё не создан. «Неактуальные» — уже сделанные.", pos: "bottom" },
             { sel: ".ai-dlapi-table", title: "Заявки", text: "Описание, кто попросил и когда. Кнопка «API создано» переносит заявку в «Неактуальные» и запоминает, кто и когда сделал.", pos: "top" }
+        ],
+
+        admin_check_ai: [
+            { sel: "#id_text", title: "Текст решения", text: "Вставь сюда код для проверки.", pos: "bottom" },
+            { sel: "#id_file", title: "Файл решения", text: "Если код в файле, выбери его здесь. Файл должен содержать текст и весить до 1 МиБ.", pos: "bottom" },
+            { sel: "#check-ai-submit", title: "Проверить", text: "Нажми, чтобы отправить решение в Pangram. Доли появятся под формой. Для короткого кода рядом будет предупреждение о точности.", pos: "top" }
         ]
     };
 
@@ -1476,36 +1482,22 @@
         if (restartBtn) startFromRestartBtn(restartBtn);
     }
 
-    // Adds `?` help element
+    // Кнопка запуска тура страницы, клик обрабатывает onDelegatedClick.
     function addViewWizardButton() {
       const content = document.getElementById("content");
-
-      // 
-      const title = content.firstElementChild;
+      const title = content && content.firstElementChild;
+      if (!title) return;
       title.style.display = 'flex';
       title.style.alignItems = 'center';
       title.style.gap = '8px';
 
       const help = document.createElement("button");
+      help.type = "button";
       help.setAttribute('data-ai-wizard-restart', '');
+      help.setAttribute("aria-label", "Открыть подсказки для страницы");
       help.textContent = "?";
       help.id = "ai-wizard-restart";
-      
-      // open wizard 
-      help.addEventListener("click", (event) => {
-        var conf = readConfig() || fallbackConfig();
-        var scope = help.dataset && help.dataset.scope
-            ? String(help.dataset.scope)
-            : (conf ? String(conf.scope || "") : "");
-        
-        if (!conf || !scope) return;
-
-        restartTour(conf, scope);
-      });
-
       title.appendChild(help);
-
-      // content.insertBefore(button, content.firstElementChild.nextSibling);
     }
 
     // === Boot ===

@@ -9,7 +9,7 @@
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
-from ..constants import WIZARD_VERSION
+from ..constants import CHECK_AI_ADMIN_PATH, WIZARD_VERSION
 from ..services.onboarding import (
     MARK_URL_ADMIN,
     record_wizard_seen,
@@ -38,6 +38,7 @@ _ADMIN_SCOPES_BY_PATH = (
     ("/ai/admin/ai/tokens/", "admin_tokens"),
     ("/ai/admin/user-models/", "admin_user_models"),
     ("/ai/admin/dl-api-requests/", "admin_dl_api_requests"),
+    (CHECK_AI_ADMIN_PATH, "admin_check_ai"),
 )
 
 # Тур ГЛАВНОГО ЭКРАНА админки («весь бар» + каждый раздел меню) — свой для
@@ -104,7 +105,12 @@ def wizard_context_for_request(request):
     return {
         "scope": scope,
         "version": WIZARD_VERSION,
-        "show": not is_viewing_as_guest(request) and should_show_wizard(user, scope),
+        # На странице проверки пользователь сам открывает подсказки кнопкой «?».
+        "show": (
+            scope != "admin_check_ai"
+            and not is_viewing_as_guest(request)
+            and should_show_wizard(user, scope)
+        ),
         "role": role,
         "mark_url": MARK_URL_ADMIN,
     }
