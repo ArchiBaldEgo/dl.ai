@@ -1,0 +1,9 @@
+#check-ai-form #id_text {
+    display: block;
+    clear: both;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 100% !important;
+    height: 160px;
+    resize: vertical;
+}

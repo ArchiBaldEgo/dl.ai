@@ -22,6 +22,7 @@ from .permissions import (
     can_access_access_groups,
     can_access_admin,
     can_access_arm,
+    can_access_check_ai,
     can_access_dl_api_requests,
     can_access_logs,
     can_access_model_status,
@@ -43,6 +44,7 @@ from .permissions import (
     user_has_key,
 )
 from ..auth_backends import get_external_user_id_from_request
+from ..constants import CHECK_AI_ADMIN_PATH, CHECK_AI_TITLE
 
 logger = logging.getLogger(__name__)
 
@@ -570,6 +572,9 @@ class AIAdminSite(admin.AdminSite):
             ("Диагностика", "Тестовая консоль", "AiTestConsole", "/ai/admin/test-console/", show_test_console, "⌘", "Запуск набора тестов приложения", "page.test_console", (
                 ("action.test_console_run", "Запускать прогоны"),
             )),
+            ("Диагностика", CHECK_AI_TITLE, "AiCheckAi", CHECK_AI_ADMIN_PATH,
+             can_access_check_ai(request), "✓", "Проверка решений через Pangram",
+             "page.check_ai", ()),
             ("Диагностика",
              "Тестовые данные",
              "AiTestData",

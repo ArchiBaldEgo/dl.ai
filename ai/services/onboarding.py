@@ -52,6 +52,7 @@ SCOPES = (
     "admin_tokens",
     "admin_user_models",
     "admin_dl_api_requests",
+    "admin_check_ai",
 )
 
 # USER_SCOPES: юзерские scope'ы с «общими» шагами (язык/модель/переключатель);
