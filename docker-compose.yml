@@ -1,7 +1,8 @@
+name: "dl_ai_${PROJ_PREFIX}"
 services:
   # Основной сервис 
   web:
-    container_name: dl_ai_web
+    container_name: "dl_ai_web_${PROJ_PREFIX}"
     
     build:
       context: .
@@ -20,8 +21,8 @@ services:
     # «Page crashed!» в worker/logs/application.log). 3.5g хватает на одновременные
     # генерации web Kimi + web DeepSeek; хост имеет 6.4ГБ (4.4ГБ доступно).
     shm_size: 512m
-    mem_limit: 3.5g
-    memswap_limit: 3.5g
+    mem_limit: 2g
+    memswap_limit: 2g
     oom_kill_disable: false
     volumes:
       - .:/app
@@ -41,7 +42,7 @@ services:
       # копия не происходит.
       - ${HOME:-/root}/.cache/puppeteer:/host-puppeteer-cache:ro
     ports:
-      - "8000:8000"
+      - "${AI_WEB_PORT:-8000}:8000"
     env_file:
       - .env
     # NOTE: WebDeepseek/.env no longer exists — all bot vars (PORT, MAX_BOT_COUNT,
@@ -71,17 +72,18 @@ services:
       - shared-network
 
   # Планировщик под самим основным сервисом
-  scheduler:
-    build: .
-    container_name: dl_ai_web_scheduler
-    command: python manage.py scheduler
-    env_file: [.env]
-    depends_on: [db, redis]
-    restart: unless-stopped
-    networks: [shared-network]
+  # scheduler:
+  #   build: .
+  #   container_name: "dl_ai_web_scheduler_${PROJ_PREFIX}"
+  #   command: python manage.py scheduler
+  #   env_file: [.env]
+  #   depends_on: [db, redis]
+  #   restart: unless-stopped
+  #   networks: [shared-network]
+
   db:
     image: postgres:14
-    container_name: dl_ai_db
+    container_name: "dl_ai_db_${PROJ_PREFIX}"
     # Без restart-политики db не поднимался следом за остальными после
     # перезагрузки WSL/хоста — web из-за этого циклился на migrate-retry.
     restart: unless-stopped
@@ -96,7 +98,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: dl_ai_redis
+    container_name: "dl_ai_redis_${PROJ_PREFIX}"
     restart: unless-stopped
     volumes:
       - redis_data:/data
@@ -111,7 +113,7 @@ services:
 
   nginx:
     image: nginx:latest
-    container_name: dl_ai_nginx
+    container_name: "dl_ai_nginx_${PROJ_PREFIX}"
     restart: unless-stopped
     ports:
       - "${AI_NGINX_BIND:-0.0.0.0}:${AI_NGINX_PORT:-8080}:80"
@@ -126,13 +128,13 @@ services:
 
 volumes:
   postgres_data:
-    name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}"
+    name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}_${PROJ_PREFIX}"
   redis_data:
-    name: "${REDIS_VOLUME_NAME:-dlai_redis_data}"
+    name: "${REDIS_VOLUME_NAME:-dlai_redis_data}_${PROJ_PREFIX}"
   static_volume:
   WebPools_node_modules:
   WebPools_puppeteer_cache:
 
 networks:
   shared-network:
-    name: "${DOCKER_NETWORK_NAME:-dlai-network}"
+    name: "${DOCKER_NETWORK_NAME:-dlai-network}_${PROJ_PREFIX}"
