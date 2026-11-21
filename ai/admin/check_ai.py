@@ -12,6 +12,7 @@ from .site import ai_admin_site
 MAX_INPUT_MIB = 1
 MAX_INPUT_BYTES = MAX_INPUT_MIB * 1024 * 1024
 MAX_INPUT_LABEL = f"{MAX_INPUT_MIB} МиБ"
+SHORT_INPUT_WORDS = 50
 
 
 class CheckAiForm(forms.Form):
@@ -72,8 +73,10 @@ def admin_check_ai_view(request):
     if request.method == "POST":
         form = CheckAiForm(request.POST, request.FILES)
         if form.is_valid():
+            text = form.cleaned_data["text"]
             try:
-                result = check_text(form.cleaned_data["text"])
+                result = check_text(text)
+                result["short_input"] = len(text.split()) < SHORT_INPUT_WORDS
             except PangramError as exc:
                 status, error = exc.status, str(exc)
         else:

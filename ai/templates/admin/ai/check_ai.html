@@ -27,6 +27,13 @@
 {% if result %}
   <section class="module" aria-labelledby="check-ai-result">
     <h2 id="check-ai-result">Результат Pangram</h2>
+    {% if result.short_input %}
+      <p><strong>Недостаточно данных для вывода об авторстве.</strong> Короткий фрагмент может получить ошибочную оценку.</p>
+      <details>
+        <summary>Показать проценты Pangram</summary>
+    {% else %}
+      <p class="help">Ниже показана оценка Pangram. Для исходного кода она может быть неточной.</p>
+    {% endif %}
     <dl>
       <dt>Сгенерировано ИИ</dt>
       <dd>{{ result.ai_percent }}%</dd>
@@ -35,6 +42,7 @@
       <dt>Написано человеком</dt>
       <dd>{{ result.human_percent }}%</dd>
     </dl>
+    {% if result.short_input %}</details>{% endif %}
   </section>
 {% endif %}
 {% endblock %}
