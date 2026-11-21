@@ -1,5 +1,8 @@
 """Форма проверки решения на признаки использования ИИ."""
 
+import codecs
+import re
+
 from django import forms
 from django.http import HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
@@ -13,6 +16,20 @@ MAX_INPUT_MIB = 1
 MAX_INPUT_BYTES = MAX_INPUT_MIB * 1024 * 1024
 MAX_INPUT_LABEL = f"{MAX_INPUT_MIB} МиБ"
 SHORT_INPUT_WORDS = 50
+
+
+def _decode_uploaded_text(content: bytes) -> str:
+    if content.startswith(codecs.BOM_UTF8):
+        return content.decode("utf-8-sig")
+    # Метка UTF-32 LE начинается с тех же байтов, что и метка UTF-16 LE.
+    if content.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        return content.decode("utf-32")
+    if content.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return content.decode("utf-16")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode("cp1251")
 
 
 class CheckAiForm(forms.Form):
@@ -30,7 +47,10 @@ class CheckAiForm(forms.Form):
     file = forms.FileField(
         label="Файл решения",
         required=False,
-        help_text=f"Текстовый файл или исходный код в UTF-8, до {MAX_INPUT_LABEL}.",
+        help_text=(
+            f"Текстовый файл или исходный код до {MAX_INPUT_LABEL}. "
+            "Поддерживаются UTF-8, Windows-1251, а также UTF-16 и UTF-32 с меткой кодировки."
+        ),
     )
 
     def clean(self):
@@ -46,14 +66,17 @@ class CheckAiForm(forms.Form):
             if upload.size > MAX_INPUT_BYTES:
                 raise forms.ValidationError(f"Максимальный размер файла — {MAX_INPUT_LABEL}.")
             try:
-                # utf-8-sig убирает BOM, который бывает в текстовых файлах Windows.
-                text = upload.read().decode("utf-8-sig")
+                text = _decode_uploaded_text(upload.read())
             except UnicodeDecodeError as exc:
-                raise forms.ValidationError("Сохраните файл как текст в UTF-8.") from exc
+                raise forms.ValidationError(
+                    "Не удалось прочитать кодировку файла. Пересохраните его в UTF-8."
+                ) from exc
 
         if not text.strip():
             raise forms.ValidationError("Введите текст или выберите непустой текстовый файл.")
-        if "\x00" in text:
+        # Бинарный файл может декодироваться как Windows-1251, но содержит управляющие символы.
+        has_control_characters = upload and re.search(r"[\x01-\x08\x0e-\x1f\x7f-\x9f]", text)
+        if "\x00" in text or has_control_characters:
             raise forms.ValidationError("Для проверки нужен обычный текст или исходный код.")
         if len(text.encode("utf-8")) > MAX_INPUT_BYTES:
             raise forms.ValidationError(f"Максимальный размер текста — {MAX_INPUT_LABEL}.")
