@@ -29,4 +29,4 @@ CHECK_AI_ADMIN_PATH = "/ai/admin/check-ai/"
 CHECK_AI_TITLE = "Проверка на ИИ"
 # Версия текстов онбординг-wizard (ai-wizard.js + ai/services/onboarding.py).
 # Меняешь шаги/тексты тура — поднимай номер: все увидят этот тур заново один раз.
-WIZARD_VERSION = 14
+WIZARD_VERSION = 15

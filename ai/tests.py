@@ -2112,6 +2112,7 @@ class TopPanelIncludeTests(SimpleTestCase):
         self.assertIn('id="selectLang"', panel)
         self.assertIn('id="selectType"', panel)
         self.assertIn('data-vision="1"', panel)
+        self.assertNotIn('id="selectModelSort"', panel)
 
     def test_user_model_option_uses_supports_vision(self):
         panel = self._render(
@@ -6108,6 +6109,116 @@ class ModelSortingTests(SimpleTestCase):
         for m in context["other_models"]:
             self.assertNotEqual(m["key"], "OR_Nemotron_Nano_12B_VL")
 
+    @staticmethod
+    def _model(key, title, avg=None, pct=None):
+        return {"key": key, "title": title, "capabilities": {},
+                "avg_seconds": avg, "percent_solved": pct}
+
+    def test_quality_scores_mix_speed_and_accuracy(self):
+        """score = 0.5 * (1 - avg/max_avg) + 0.5 * (pct/100); без данных — None."""
+        from ai.services.model_stats import quality_scores
+        scores = quality_scores({
+            "fast": {"avg_seconds": 1.0, "percent_solved": 100.0},
+            "slow": {"avg_seconds": 8.0, "percent_solved": 100.0},
+            "mixed": {"avg_seconds": 4.0, "percent_solved": 0.0},
+            "none": {"avg_seconds": None, "percent_solved": None},
+        })
+        self.assertIsNone(scores["none"])
+        self.assertAlmostEqual(scores["fast"], 0.5 * (1 - 1 / 8) + 0.5)
+        self.assertAlmostEqual(scores["slow"], 0.5)
+        self.assertAlmostEqual(scores["mixed"], 0.5 * (1 - 4 / 8))
+        self.assertGreater(scores["fast"], scores["slow"])
+        self.assertGreater(scores["slow"], scores["mixed"])
+
+    def test_quality_scores_single_metric_only(self):
+        """Учитываются только имеющиеся показатели; пустая карта — пустой dict."""
+        from ai.services.model_stats import quality_scores
+        self.assertEqual(
+            quality_scores({"pct": {"avg_seconds": None, "percent_solved": 80.0}}),
+            {"pct": 0.4},
+        )
+        # Одно время без других моделей: max_avg = само время → 0.5 * 0.
+        self.assertEqual(
+            quality_scores({"avg": {"avg_seconds": 3.0, "percent_solved": None}}),
+            {"avg": 0.0},
+        )
+        self.assertEqual(quality_scores({}), {})
+
+    def test_selector_groups_sorted_by_quality(self):
+        """«Все модели» — по убыванию качества; без данных — в конце по алфавиту."""
+        from ai.views import _build_model_selector_groups
+        models = [
+            self._model("Slow", "Slow", avg=8.0, pct=100.0),
+            self._model("Fast", "Fast", avg=1.0, pct=100.0),
+            self._model("Mixed", "Mixed", avg=4.0, pct=0.0),
+            self._model("Zeta", "Zeta"),
+            self._model("Alpha", "Alpha"),
+        ]
+        flat, favorites, other, experimental, default_key = _build_model_selector_groups(models, [])
+        self.assertEqual(
+            [m["key"] for m in other], ["Fast", "Slow", "Mixed", "Alpha", "Zeta"])
+        self.assertEqual(favorites, [])
+        self.assertEqual(experimental, [])
+        # Нет фаворита → дефолт = лучшая по качеству (не Gemma).
+        self.assertEqual(default_key, "Fast")
+        self.assertEqual([m["key"] for m in flat], [m["key"] for m in other])
+
+    def test_selector_groups_favorite_first_not_duplicated(self):
+        from ai.views import _build_model_selector_groups
+        models = [
+            self._model("A", "A", avg=1.0, pct=100.0),
+            self._model("B", "B", avg=2.0, pct=100.0),
+        ]
+        flat, favorites, other, _, default_key = _build_model_selector_groups(models, ["B"])
+        self.assertEqual([m["key"] for m in favorites], ["B"])
+        self.assertEqual([m["key"] for m in other], ["A"])
+        self.assertEqual([m["key"] for m in flat], ["B", "A"])
+        self.assertEqual(default_key, "")
+
+    def test_selector_groups_tie_break_by_title(self):
+        from ai.views import _build_model_selector_groups
+        models = [
+            self._model("K2", "Beta", avg=1.0, pct=50.0),
+            self._model("K1", "Alpha", avg=1.0, pct=50.0),
+        ]
+        _, _, other, _, _ = _build_model_selector_groups(models, [])
+        self.assertEqual([m["key"] for m in other], ["K1", "K2"])
+
+    def test_selector_groups_default_gemma_only_without_stats(self):
+        """Без статистики вовсе — старый фолбэк DEFAULT_MODEL_KEY первым."""
+        from ai.views import _build_model_selector_groups
+        from ai.model_clients.registry import DEFAULT_MODEL_KEY
+        models = [
+            self._model("Aaa", "Aaa"),
+            self._model(DEFAULT_MODEL_KEY, "Gemma"),
+            self._model("Zzz", "Zzz"),
+        ]
+        flat, _, _, _, default_key = _build_model_selector_groups(models, [])
+        self.assertEqual(default_key, DEFAULT_MODEL_KEY)
+        self.assertEqual(flat[0]["key"], DEFAULT_MODEL_KEY)
+        # Есть статистика хоть у одной модели — дефолт = лучшая.
+        models[0].update(avg_seconds=1.0, percent_solved=100.0)
+        flat, _, _, _, default_key = _build_model_selector_groups(models, [])
+        self.assertEqual(default_key, "Aaa")
+        self.assertEqual(flat[0]["key"], "Aaa")
+
+    def test_selector_groups_experimental_last_and_never_default(self):
+        from ai.views import _build_model_selector_groups
+        models = [
+            self._model("OR_Best", "OR Best", avg=1.0, pct=100.0),
+            self._model("Web_DeepSeek", "Web DeepSeek", avg=8.0, pct=0.0),
+            self._model("OR_Worse", "OR Worse", avg=8.0, pct=0.0),
+        ]
+        flat, favorites, other, experimental, default_key = _build_model_selector_groups(models, [])
+        self.assertEqual([m["key"] for m in experimental], ["OR_Best", "OR_Worse"])
+        self.assertEqual([m["key"] for m in other], ["Web_DeepSeek"])
+        self.assertEqual(default_key, "Web_DeepSeek")  # OR_* дефолтом не бывает
+        self.assertEqual([m["key"] for m in flat], ["Web_DeepSeek", "OR_Best", "OR_Worse"])
+        # OR-модель в топе пользователя всё равно уходит в experimental.
+        flat, favorites, _, _, _ = _build_model_selector_groups(models, ["OR_Best"])
+        self.assertEqual(favorites, [])
+        self.assertEqual(flat[-1]["key"], "OR_Worse")
+
     def test_selector_context_separates_user_model_options_from_panel_rows(self):
         """base_chat.html читает ``user_models_options``: строки таблицы панели
         (ключ ``user_models``) не должны попадать в optgroup — у них нет
@@ -10010,8 +10121,10 @@ class AIModelStatsTests(TestCase):
         self.assertEqual((row.total_count, row.duration_count), (1, 1))
 
     def test_scoped_map_isolation(self):
-        """Карта читает РОВНО один скоуп: тема ≠ язык ≠ легаси (иначе строки
-        разных скоупов в ключе model_key перезаписывали бы друг друга)."""
+        """Карта читает РОВНО один скоуп: тема ≠ язык ≠ глобальный агрегат
+        (иначе строки разных скоупов в ключе model_key перезаписывали бы друг
+        друга). Глобальный агрегат — только языковые строки: строки темы —
+        зеркала, их нельзя суммировать (иначе пары считаются дважды)."""
         from ai.models import AIModelStats
         from ai.services.model_stats import get_model_stats_map
         AIModelStats.objects.create(
@@ -10028,16 +10141,33 @@ class AIModelStatsTests(TestCase):
         self.assertNotIn("K2", topic_stats)
         lang_stats = get_model_stats_map(["K1"], language_id=self.lang.pk)
         self.assertEqual(lang_stats["K1"], {"avg_seconds": 1.0, "percent_solved": 100.0})
-        # Без скоупа — общие данные по ВСЕМ темам и языкам: сумма scoped-строк
-        # K1 (8с/1 замер + 2с/2 замера → 10/3 = 3.3; 3 решено из 6 = 50%).
-        legacy = get_model_stats_map(["K1", "K2"])
-        self.assertEqual(legacy["K1"], {"avg_seconds": 3.3, "percent_solved": 50.0})
-        self.assertNotIn("K2", legacy)  # легаси-строка (NULL, NULL) в агрегат не попадает
+        # Без скоупа — языковые строки (по одному приращению на пару):
+        # строка темы K1 (1 из 4) не приплюсовывается, глобус = языковая строка.
+        global_stats = get_model_stats_map(["K1", "K2"])
+        self.assertEqual(global_stats["K1"], {"avg_seconds": 1.0, "percent_solved": 100.0})
+        self.assertNotIn("K2", global_stats)  # легаси-строка (NULL, NULL) в агрегат не попадает
+
+    def test_global_aggregate_does_not_double_count(self):
+        """Глобальный агрегат (без скоупа) суммирует ТОЛЬКО языковые строки:
+        каждая пара пишет и строку темы, и языковую — их сумма удвоила бы пары."""
+        from ai.services.model_stats import get_model_stats_map, record_batch_solve_stats
+        record_batch_solve_stats([
+            self._pair("K1", "solved", 2.0, self.lang.pk, self.topic.pk),
+            self._pair("K1", "failed", 4.0, self.lang.pk, self.topic.pk),
+            self._pair("K1", "solved", 3.0, self.other_lang.pk, None),
+        ])
+        # Пары по языкам: Pascal — 1 из 2 решено, замеры 2с и 4с; Python —
+        # 1 из 1, 3с. Итог по языковым строкам: 2 из 3 = 66.7%, avg = 9/3 = 3.0.
+        # С удвоением строк темы было бы 3 из 4 = 75% (avg не изменился бы).
+        self.assertEqual(
+            get_model_stats_map(["K1"]),
+            {"K1": {"avg_seconds": 3.0, "percent_solved": 66.7}},
+        )
 
     def test_available_model_options_enriched_with_stats(self):
-        """get_available_model_options читает только легаси-скоуп (NULL/NULL) —
-        data-атрибуты остались сортировке #selectModelSort (обогащение до
-        cache.set — Redis-копии не мутируем)."""
+        """get_available_model_options обогащает data-атрибуты глобальным
+        агрегатом (языковые строки) до cache.set — Redis-копии не мутируем;
+        легаси-строка (NULL/NULL) не читается."""
         from django.core.cache import cache
         from ai.models import AIModelAvailability, AIModelStats
         from ai.model_health import get_available_model_options, get_health_window_date, MODEL_CATALOG_KEYS
@@ -10045,8 +10175,12 @@ class AIModelStatsTests(TestCase):
             self.skipTest("No models in registry")
         key = MODEL_CATALOG_KEYS[0]
         AIModelStats.objects.create(
-            model_key=key, solved_count=1, total_count=1,
-            duration_count=1, duration_sum=5.0)  # легаси-строка напрямую
+            model_key=key, solved_count=2, total_count=2,
+            duration_count=2, duration_sum=10.0,
+            programming_language=self.lang, topic=None)  # языковая строка
+        AIModelStats.objects.create(
+            model_key=key, solved_count=0, total_count=1,
+            duration_count=1, duration_sum=99.0)  # легаси (NULL, NULL) — игнор
         AIModelAvailability.objects.create(
             model_key=key, model_title=key, is_available=True,
             window_date=get_health_window_date(), last_message="ok",
@@ -11380,7 +11514,7 @@ class ModelStatsSuffixStripTests(SimpleTestCase):
     ни blur (фокус остаётся на селекте) — суффикс висел в закрытом селекте
     до первого клика по странице. Регрессионный гард на источник: слушатели
     document pointerdown/click вне селекта обязаны оставаться в
-    initModelSortSelector (static/admin/js/ai-common.js)."""
+    initModelSelectorStats (static/admin/js/ai-common.js)."""
 
     def _source(self):
         from pathlib import Path
@@ -17204,6 +17338,16 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Группы доступа")
 
+    def test_nav_registry_entries_have_actions_slot(self):
+        """Все записи _ai_tool_defs — 9-элементные: 9-й (actions) обязателен
+        для потребителей вроде _dynamic_page_doc_permissions (Emails когда-то
+        был 8-элементным и ронял всю страницу групп IndexError'ом)."""
+        from ai.admin.site import ai_admin_site
+        tools = ai_admin_site._ai_tool_defs(self._request(self.superuser))
+        self.assertTrue(tools)
+        for tool in tools:
+            self.assertEqual(len(tool), 9, tool)
+
     def test_two_column_actions_card(self):
         """Две колонки прав (ТЗ 2026-10-20): слева — страницы без
         аккордеонов; справа — «Действия» АКТИВНЫХ страниц группы (в базе
@@ -17529,6 +17673,11 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
         self.assertIn('value="action.test_console_run"', html)
         self.assertIn('value="action.updates_publish"', html)
         self.assertIn('value="page.mgmt_users"', html)
+        # Emails и «Проверка на ИИ» — обычные чекбоксы страниц (выдаются
+        # группами вручную; служебных групп для них нет).
+        self.assertIn('value="page.emails"', html)
+        self.assertIn('value="page.check_ai"', html)
+        self.assertIn("Проверка на ИИ", html)
         self.assertIn('value="page.mgmt_shared_prompt"', html)
         self.assertIn("Видеть все промпты", html)
         self.assertIn("Запускать прогоны", html)
@@ -20624,9 +20773,9 @@ class ModelStatsApiTests(TestCase):
         self.assertEqual(data["stats"][self.model_key]["percent_solved"], 0.0)
 
     def test_global_aggregate_when_requested_without_scope(self):
-        """Без языка/темы — ОБЩИЕ данные по всем темам и языкам: взвешенная
-        сумма scoped-строк модели; легаси-строки (NULL, NULL) в агрегат не
-        попадают; битый progLng по-прежнему пусто."""
+        """Без языка/темы — ОБЩИЕ данные по всем языкам: взвешенная сумма
+        языковых строк модели; легаси-строки (NULL, NULL) и строки тем в
+        агрегат не попадают; битый progLng по-прежнему пусто."""
         self._record("solved", 2.0, None)
         stats = json.loads(self._request({}).content)["stats"]
         self.assertEqual(
@@ -20651,8 +20800,8 @@ class ModelStatsApiTests(TestCase):
         )
 
     def test_global_aggregate_spans_languages_and_topics(self):
-        """Общий скоуп суммирует ВСЕ языки и темы модели (взвешенно), а не
-        только последний записанный язык."""
+        """Общий скоуп суммирует языковые строки ВСЕХ языков модели
+        (взвешенно), а не только последний записанный язык."""
         other_lang = ProgrammingLanguage.objects.create(language_name="Python")
         self._record("solved", 2.0, None)                       # Pascal-языковая
         self._record("failed", 4.0, None)                       # Pascal-языковая
@@ -20666,6 +20815,24 @@ class ModelStatsApiTests(TestCase):
         stats = json.loads(self._request({}).content)["stats"]
         self.assertEqual(
             stats[self.model_key], {"avg_seconds": 2.3, "percent_solved": 66.7})
+
+    def test_global_aggregate_ignores_topic_mirror_rows(self):
+        """Пара с темой пишет и строку темы, и языковую. Глобальный агрегат
+        читает только языковые — иначе пары считались бы дважды."""
+        from ai.models import AIModelStats
+        AIModelStats.objects.create(
+            model_key=self.model_key, solved_count=1, total_count=2,
+            duration_count=2, duration_sum=6.0,
+            programming_language=self.lang, topic=None)
+        AIModelStats.objects.create(
+            model_key=self.model_key, solved_count=10, total_count=10,
+            duration_count=10, duration_sum=10.0,
+            programming_language=self.lang, topic=self.topic)
+        stats = json.loads(self._request({}).content)["stats"]
+        # Только языковая строка: 1 из 2 = 50%, avg = 6/2 = 3.0.
+        # С суммированием строки темы было бы 11 из 12 = 91.7%, avg = 1.3.
+        self.assertEqual(
+            stats[self.model_key], {"avg_seconds": 3.0, "percent_solved": 50.0})
 
     def test_no_rows_for_scope(self):
         self._record("solved", 2.0, self.topic.pk)
@@ -20765,9 +20932,10 @@ class DeleteArmRunStatsTests(TestCase):
 
 
 class ClientStatsGatingTests(SimpleTestCase):
-    """Статик-контракт суффиксов (Batch B): суффиксы живут только на задачных
-    страницах (гейт по #selectProgLng), цифры — из скоуп-ответа
-    /ai/api/model-stats/, data-атрибуты остались сортировке."""
+    """Статик-контракт суффиксов и сортировки: цифры есть на ВСЕХ клиентских
+    страницах (в чате — глобальные data-атрибуты, на задачных — скоуп-ответ
+    /ai/api/model-stats/); порядок «Все модели»/OR_* — всегда по качеству,
+    пользовательского переключателя режима нет."""
 
     def _read(self, *parts):
         from django.conf import settings
@@ -20777,21 +20945,42 @@ class ClientStatsGatingTests(SimpleTestCase):
     def test_ai_common_suffix_gate_and_scoped_fetch(self):
         js = self._read("static", "admin", "js", "ai-common.js")
         self.assertIn("function modelSuffixesEnabled()", js)
+        # Гейт цифр — наличие селектора моделей (чат тоже показывает цифры).
+        self.assertIn("return !!document.getElementById('select');", js)
         self.assertIn("if (!modelSelect || !modelSuffixesEnabled()) return;", js)
         self.assertIn("function updateScopedModelStats()", js)
+        self.assertIn("if (!progLng) return;", js)  # чат не делает лишний запрос
         self.assertIn("'/ai/api/model-stats/'", js)
         self.assertIn("function scopedModelOptionStats(opt)", js)
+        self.assertIn("function activeModelOptionStats(opt)", js)
+        self.assertIn("function sortModelOptionsByStats()", js)
         # Wiring: смена #selectProgLng/#selectTheme + init/repopulate тянут скоуп.
         self.assertGreaterEqual(js.count("updateScopedModelStats();"), 4)
 
-    def test_base_chat_keeps_sort_data_attrs(self):
+    def test_base_chat_keeps_global_data_attrs(self):
         # Шапка вынесена в общий partial — проверяем её вместе с базовым
         # шаблоном (base_chat только подключает _top_panel.html).
         tpl = self._read("ai", "templates", "ai", "base_chat.html") + self._read(
             "ai", "templates", "ai", "_top_panel.html")
         self.assertIn("data-avg-seconds", tpl)
         self.assertIn("data-percent-solved", tpl)
-        self.assertIn("selectModelSort", tpl)
+        self.assertNotIn("selectModelSort", tpl)
+
+    def test_sort_mode_switch_removed_everywhere(self):
+        """Переключатель режима сортировки удалён целиком (KISS): нет ни
+        элемента, ни localStorage-ключа в любом клиентском статике."""
+        files = (
+            ("static", "admin", "js", "ai-common.js"),
+            ("static", "admin", "js", "ai-wizard.js"),
+            ("static", "admin", "css", "ai.css"),
+            ("ai", "templates", "ai", "_top_panel.html"),
+            ("ai", "i18n.py"),
+        )
+        for parts in files:
+            text = self._read(*parts)
+            for needle in ("selectModelSort", "ai_model_sort_mode", "MODEL_SORT_KEY",
+                           "sortDefault", "sortSpeed", "sortAccuracy", "sortBoth"):
+                self.assertNotIn(needle, text, msg="%s: %s" % ("/".join(parts), needle))
 
     def test_arm_runner_results_carry_scope(self):
         src = self._read("ai", "arm_runner.py")
@@ -21130,18 +21319,20 @@ class ChatThinkToggleStaticTests(TestCase):
         self.assertIn(".think-toggle[hidden] {", css)
 
     def test_wizard_chat_tour_think_step(self):
-        """Чат-тур: шаг кнопки Think — ПОСЛЕ выбора модели и ДО сортировки
+        """Чат-тур: шаг кнопки Think — ПОСЛЕ выбора модели и ДО режима
         (по требованию владельца), с skipIfHidden: кнопка скрыта на
         не-Ollama моделях, шаг пропускается мгновенно (контракт «скрыта
         сейчас = шаг не для этого состояния»), а не ждать и падать.
-        en/fr-переводы шага на месте (триязычный клиент)."""
+        Шага сортировки моделей больше нет. en/fr-переводы шага на месте
+        (триязычный клиент)."""
         js = self._read("static", "admin", "js", "ai-wizard.js")
         chat = js[js.index("        chat: ["): js.index("        solve: [")]
         self.assertIn('sel: "#thinkToggleBtn"', chat)
         self.assertLess(
             chat.index('sel: "#select", rank: 11'), chat.index('sel: "#thinkToggleBtn"'))
         self.assertLess(
-            chat.index('sel: "#thinkToggleBtn"'), chat.index('sel: "#selectModelSort"'))
+            chat.index('sel: "#thinkToggleBtn"'), chat.index('sel: "#selectType"'))
+        self.assertNotIn("#selectModelSort", chat)
         step_at = js.index('sel: "#thinkToggleBtn", rank: 12')
         self.assertIn("skipIfHidden: true", js[step_at: step_at + 300])
         # Движок: мгновенный пропуск скрытой цели по флагу шага.
@@ -21304,6 +21495,85 @@ class KeyedPageAccessTests(_AdminViewRequestMixin, TestCase):
         )
         request = self._admin_request(updater2, path="/x/")
         self.assertTrue(admin.has_change_permission(request, obj=None))
+
+    def test_emails_page_by_key_only(self):
+        """page.emails: держатель ключа видит справочник; без ключа — 403."""
+        from ai.admin.emails import view as emails_view
+
+        user = self._grant("emails-key", ["page.admin", "page.emails"])
+        request = self._admin_request(user, path="/ai/admin/emails/")
+        self.assertEqual(emails_view.view(request).status_code, 200)
+
+        user2 = self._grant("emails-plain", ["page.admin"])
+        request = self._admin_request(user2, path="/ai/admin/emails/")
+        self.assertEqual(emails_view.view(request).status_code, 403)
+
+        # «Посмотреть как…»: суперюзерский обход выключен, без ключа — 403.
+        superuser = self.user_model.objects.create_superuser(
+            username="emails-super", password="x", email="s@a.com",
+        )
+        request = self._admin_request(superuser, path="/ai/admin/emails/")
+        self._enter_view_as(request, self._view_as_group("Эмуля-emails", ["page.admin"]))
+        self.assertEqual(emails_view.view(request).status_code, 403)
+        self._leave_view_as(superuser)
+
+    def test_check_ai_page_by_key_only(self):
+        """page.check_ai: держатель ключа видит форму; без ключа — 403."""
+        from ai.admin.check_ai import admin_check_ai_view
+
+        user = self._grant("checkai-key", ["page.admin", "page.check_ai"])
+        request = self._admin_request(user, path="/ai/admin/check-ai/")
+        self.assertEqual(admin_check_ai_view(request).status_code, 200)
+
+        user2 = self._grant("checkai-plain", ["page.admin"])
+        request = self._admin_request(user2, path="/ai/admin/check-ai/")
+        self.assertEqual(admin_check_ai_view(request).status_code, 403)
+
+        superuser = self.user_model.objects.create_superuser(
+            username="checkai-super", password="x", email="s@a.com",
+        )
+        request = self._admin_request(superuser, path="/ai/admin/check-ai/")
+        self._enter_view_as(request, self._view_as_group("Эмуля-checkai", ["page.admin"]))
+        self.assertEqual(admin_check_ai_view(request).status_code, 403)
+        self._leave_view_as(superuser)
+
+    def test_emails_add_delete_and_malformed_pk(self):
+        """Справочник: добавление, удаление по pk; мусорный pk — redirect, не 500."""
+        from ai.admin.emails import view as emails_view
+        from ai.models import UserToEmailDictionary
+
+        user = self._grant("emails-crud", ["page.admin", "page.emails"])
+
+        add = self._admin_request(
+            user, method="post", path="/ai/admin/emails/",
+            data={"user": "Иванов Иван", "email": "ivanov@example.com"},
+        )
+        self.assertEqual(emails_view.view(add).status_code, 302)
+        row = UserToEmailDictionary.objects.get(user="Иванов Иван")
+
+        delete = self._admin_request(
+            user, method="post", path="/ai/admin/emails/",
+            data={"action": "delete", "pk": row.pk},
+        )
+        self.assertEqual(emails_view.view(delete).status_code, 302)
+        self.assertFalse(UserToEmailDictionary.objects.filter(pk=row.pk).exists())
+
+        bad = self._admin_request(
+            user, method="post", path="/ai/admin/emails/",
+            data={"action": "delete", "pk": "abc"},
+        )
+        self.assertEqual(emails_view.view(bad).status_code, 302)
+
+    def test_new_pages_have_permissions_without_service_group(self):
+        """Ключи Emails/Check AI засижены для чекбоксов; группы «Check AI» нет."""
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        self.assertFalse(AIAccessGroup.objects.filter(name="Check AI").exists())
+        self.assertTrue(
+            AIAdminGroupPermission.objects.filter(key="page.emails").exists())
+        check = AIAdminGroupPermission.objects.get(key="page.check_ai")
+        self.assertEqual(check.label, "Проверка на ИИ")
+        self.assertEqual(check.section, AIAdminGroupPermission.SECTION_PAGE)
 
 
 class BaselineMarkerTests(_AdminViewRequestMixin, TestCase):

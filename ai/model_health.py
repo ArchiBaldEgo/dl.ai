@@ -942,15 +942,14 @@ def get_available_model_options():
         if key in available_rows
     ]
     # Статистика прогонов /arm/solve/ (среднее время, % решённых) — для
-    # сортировки селектора моделей чата. Читается легаси-глобальный скоуп
-    # (NULL/NULL): новые приращения пишутся в скоупы язык/тема — эти данные
-    # заморозены и нужны только сортировке (цифровых суффиксов больше нет —
-    # см. ai-common.js). Обогащаем ДО cache.set: Redis-копии из кеша мутировать
+    # порядка и цифр селектора моделей. Читается ГЛОБАЛЬНЫЙ агрегат
+    # языковые scoped-строки по всем языкам (get_model_stats_map без скоупа).
+    # Обогащаем ДО cache.set: Redis-копии из кеша мутировать
     # нельзя (cache.get возвращает десериализованную копию).
     if result:
-        from .services.model_stats import get_legacy_stats_map
+        from .services.model_stats import get_model_stats_map
 
-        stats = get_legacy_stats_map([opt["key"] for opt in result])
+        stats = get_model_stats_map([opt["key"] for opt in result])
         for opt in result:
             opt.update(stats.get(opt["key"], {}))
         cache.set(cache_key, result, 30)  # 30 c

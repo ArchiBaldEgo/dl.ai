@@ -186,6 +186,82 @@ def _get_user_top_model_keys(request, limit=1):
         return []
 
 
+def _build_model_selector_groups(available_models, user_top_keys):
+    """Разбивает каталог на группы селектора и выбирает модель по умолчанию.
+
+    Фаворит (топ-1 не-experimental) — отдельная группа сверху. Остальные
+    non-experimental и экспериментальные OR_* сортируются по убыванию
+    качества (``quality_scores``: 0.5 скорости + 0.5 точности); модели без
+    данных — после них, по алфавиту. Без фаворита выбранной по умолчанию идёт
+    первая quality-модель; если статистики нет вовсе — прежний фолбэк
+    ``DEFAULT_MODEL_KEY``.
+
+    Возвращает ``(flat, favorite_models, other_models, experimental_models,
+    default_model_key)``.
+    """
+    from .services.model_stats import quality_scores
+
+    model_map = {item["key"]: item for item in available_models}
+    user_picks = [
+        model_map[key] for key in user_top_keys
+        if key in model_map
+        and not key.startswith(EXPERIMENTAL_MODEL_PREFIXES)
+    ]
+    favorite_models = user_picks[:1]
+    used_keys = {item["key"] for item in user_picks}
+
+    stats_map = {
+        item["key"]: {
+            "avg_seconds": item.get("avg_seconds"),
+            "percent_solved": item.get("percent_solved"),
+        }
+        for item in available_models
+    }
+    scores = quality_scores(stats_map)
+
+    def sort_key(item):
+        score = scores.get(item["key"])
+        title = (item.get("title") or "").lower()
+        if score is None:
+            return (1, 0.0, title, item["key"])
+        return (0, -score, title, item["key"])
+
+    rest_candidates = [
+        item for item in available_models if item["key"] not in used_keys
+    ]
+    experimental_models = sorted(
+        [
+            item for item in rest_candidates
+            if item["key"].startswith(EXPERIMENTAL_MODEL_PREFIXES)
+        ],
+        key=sort_key,
+    )
+    other_models = sorted(
+        [
+            item for item in rest_candidates
+            if not item["key"].startswith(EXPERIMENTAL_MODEL_PREFIXES)
+        ],
+        key=sort_key,
+    )
+
+    default_model_key = ""
+    if not user_picks:
+        if other_models and scores.get(other_models[0]["key"]) is not None:
+            default_model_key = other_models[0]["key"]
+        elif DEFAULT_MODEL_KEY in model_map:
+            default_model_key = DEFAULT_MODEL_KEY
+            # Полное отсутствие статистики: прежний фолбэк — дефолт первым
+            # (порядок без данных и так алфавитный).
+            default_item = model_map[DEFAULT_MODEL_KEY]
+            other_models = [default_item] + [
+                item for item in other_models
+                if item["key"] != DEFAULT_MODEL_KEY
+            ]
+
+    flat = user_picks + other_models + experimental_models
+    return flat, favorite_models, other_models, experimental_models, default_model_key
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -425,9 +501,10 @@ def _render_ai_page(request, template_name, extra_context=None,
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
     Проверяет доступ, загружает список доступных моделей (с self-heal при пустом
-    списке), сортирует их (топ-1 фаворит пользователя → модель по умолчанию →
-    алфавит) и разбивает на группы favorite_models/other_models для
-    optgroup-разделителя в шаблоне, и добавляет external_session_id +
+    списке), разбивает их на группы favorite_models/other_models/
+    experimental_models для optgroup-разделителя в шаблоне (топ-1 фаворит
+    сверху, дальше по убыванию качества; см. _build_model_selector_groups),
+    выбирает модель по умолчанию и добавляет external_session_id +
     сохранённый из куки язык.
 
     wizard_scope — scope онбординг-wizard для этой страницы (ai/services/
@@ -465,48 +542,13 @@ def _render_ai_page(request, template_name, extra_context=None,
         except Exception:
             logger.exception("Failed to trigger model health self-heal refresh")
     if available_models:
-        # Топ-1 фаворит пользователя (по частоте использования) — наверх.
+        # Фаворит — отдельной группой сверху; «Все модели» и OR_* — по
+        # убыванию качества; без статистики — в конце по алфавиту.
         user_top = _get_user_top_model_keys(request, limit=1)
-        model_map = {item["key"]: item for item in available_models}
-        # Experimental-модели не становятся фаворитом даже если их чаще всего
-        # вызывали: они всегда в самом низу селектора (отдельная optgroup).
-        user_picks = [
-            model_map[k] for k in user_top
-            if k in model_map and not k.startswith(EXPERIMENTAL_MODEL_PREFIXES)
-        ]
-
-        # Остальные — строго по алфавиту (title). Без отдельного приоритета
-        # Web_DeepSeek: фаворит наверху, далее алфавит (включая Web_DeepSeek).
-        # used_keys — только РЕАЛЬНО поднятые фавориты (без OR-исключённых,
-        # иначе OR-модель выпадала бы из «Все модели»).
-        used_keys = {m["key"] for m in user_picks}
-        # Модель по умолчанию — первое место среди «остальных», только когда у
-        # пользователя нет своего топ-1 фаворита (шаблон ставит ей selected).
-        default_model_key = ""
-        if not user_picks and DEFAULT_MODEL_KEY in model_map:
-            default_model_key = DEFAULT_MODEL_KEY
-            used_keys.add(default_model_key)
-        rest = sorted(
-            [item for item in available_models if item["key"] not in used_keys],
-            key=lambda x: x["title"].lower(),
+        (available_models, favorite_models, other_models,
+         experimental_models, default_model_key) = _build_model_selector_groups(
+            available_models, user_top,
         )
-        if default_model_key:
-            rest.insert(0, model_map[default_model_key])
-
-        # Experimental-модели (OpenRouter, registry.EXPERIMENTAL_MODEL_PREFIXES) —
-        # отдельная optgroup В САМОМ НИЗУ селектора: их не поднимают ни фаворит,
-        # ни алфавит, ни дефолт.
-        experimental_models = [
-            item for item in rest if item["key"].startswith(EXPERIMENTAL_MODEL_PREFIXES)
-        ]
-        rest = [item for item in rest if not item["key"].startswith(EXPERIMENTAL_MODEL_PREFIXES)]
-
-        # Плоский список для обратной совместимости (тесты проверяют порядок).
-        available_models = user_picks + rest + experimental_models
-        # Группы для optgroup-разделителя в шаблоне: топ-1 фаворит + остальные
-        # (rest уже отсортирован и содержит дефолт первым, если тот применён).
-        favorite_models = user_picks[:1]
-        other_models = rest
     else:
         favorite_models = []
         other_models = []
@@ -950,8 +992,9 @@ def get_model_stats_view(request):
 
     GET /ai/api/model-stats/?progLng=<id>&topic=<id>. Тема уточняет скоуп до
     точной темы-строки; только язык → языковая строка (тема NULL) — общие
-    данные по всем темам языка; без обоих → ОБЩИЕ данные по всем темам и
-    языкам (агрегат scoped-строк модели — see get_model_stats_map). Нет
+    данные по всем темам языка; без обоих → ОБЩИЕ данные по всем языкам
+    (агрегат ЯЗЫКОВЫХ строк модели — строки тем не суммируются, см.
+    get_model_stats_map). Нет
     строк выбранного скоупа → для таких моделей ключа в ``stats`` не будет
     («ничего»), фолбэков между скоупами нет.
     """

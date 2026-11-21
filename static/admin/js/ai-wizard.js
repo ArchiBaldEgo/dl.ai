@@ -98,9 +98,8 @@
         en: {
             chat: {
                 "#selectLang": { title: "Page language", text: "This changes the language of the interface: Russian, English, French." },
-                "#select": { title: "Model selection", text: "These are different AI helper models. Click and pick who will answer you." },
+                "#select": { title: "Model selection", text: "These are different AI helper models. Click and pick who will answer you. The list is already ordered by quality — models that solve tasks more accurately and faster are on top; your favourite is in the “Frequently used” group. Not sure? Leave it as is." },
                 "#thinkToggleBtn": { title: "The Think button", text: "Visible only for Ollama models. Off — the model answers right away; on — you can first look at its reasoning (the “Thinking” block above the answer)." },
-                "#selectModelSort": { title: "Model sorting", text: "You can show faster or more precise models first." },
                 "#selectType": { title: "Mode", text: "Modes: chat, “Solve the task”, “What's the error?”. Switch through the list." },
                 "#themeToggleBtn": { title: "Light or dark", text: "Click — the page turns dark. Click again — light." },
                 "#userDocsBtn": { title: "The “?” button", text: "This is the user guide. Click if anything is unclear. You can also show these tips again there." },
@@ -147,9 +146,8 @@
         fr: {
             chat: {
                 "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes : Russe, English, Français." },
-                "#select": { title: "Choix du modèle", text: "Voici différents modèles-assistants. Clique et choisis celui qui te répondra." },
+                "#select": { title: "Choix du modèle", text: "Voici différents modèles-assistants. Clique et choisis celui qui te répondra. La liste est déjà triée par qualité — en haut, les modèles qui résolvent les tâches plus précisément et plus vite ; ton préféré est dans le groupe « Fréquemment utilisés ». Si tu ne sais pas, laisse tel quel." },
                 "#thinkToggleBtn": { title: "Le bouton Think", text: "Visible seulement pour les modèles Ollama. Désactivé — le modèle répond tout de suite ; activé — tu peux d’abord voir son raisonnement (le bloc « Réflexions » au-dessus de la réponse)." },
-                "#selectModelSort": { title: "Tri des modèles", text: "Tu peux afficher en premier les modèles plus rapides ou plus précis." },
                 "#selectType": { title: "Mode", text: "Modes : chat, « Résoudre la tâche », « Quelle est l’erreur ? ». On change via la liste." },
                 "#themeToggleBtn": { title: "Clair ou sombre", text: "Clique — la page devient sombre. Clique encore — claire à nouveau." },
                 "#userDocsBtn": { title: "Le bouton « ? »", text: "C’est le guide utilisateur. Clique si quelque chose n’est pas clair. Tu peux aussi réafficher ces astuces ici." },
@@ -300,15 +298,14 @@
 
         chat: [
             // Строгий порядок чата (ранг: явный rank сильнее геометрии):
-            // язык → модель → think → сортировка → режим → тема → «?» →
+            // язык → модель → think → режим → тема → «?» →
             // голосовой → «Мои модели» → «Админ-Панель» (по правам) →
             // история → ввод → отправить → очистить.
             // Шагов с common в чате НЕТ: basics_seen не режет чат — тур всегда
             // полный и строгий (ранги).
             { sel: "#selectLang", rank: 10, title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français. Сам текст вопросов и ответов — всегда на том языке, на котором ты пишешь.", pos: "bottom" },
-            { sel: "#select", rank: 11, title: "Выбор модели", text: "Это разные помощники-модели: нажми и выбери, кто будет отвечать. Не знаешь, кого взять — оставь как есть: наверху стоит обычно та, что выбиралась чаще всего.", pos: "bottom" },
+            { sel: "#select", rank: 11, title: "Выбор модели", text: "Это разные помощники-модели: нажми и выбери, кто будет отвечать. Список уже разложен по качеству — сверху модели, которые решают задачи точнее и быстрее; твоя любимая — в группе «Часто используемые». Не знаешь, кого взять — оставь как есть.", pos: "bottom" },
             { sel: "#thinkToggleBtn", rank: 12, skipIfHidden: true, title: "Кнопка Think", text: "Видна только у моделей Ollama. Выключено — модель отвечает сразу; включено — сначала можно посмотреть её рассуждения (блок «Размышления» над ответом).", pos: "bottom" },
-            { sel: "#selectModelSort", rank: 13, title: "Сортировка моделей", text: "Здесь можно переложить список: сначала более быстрые модели или сначала более точные. Вернуть как было — режим «по алфавиту».", pos: "bottom" },
             { sel: "#selectType", rank: 14, title: "Режим", text: "Режимы: чат, «Реши задачу», «В чём ошибка». Через этот список переключаешься между страницами — всё твоё (модель, тема) запомнится.", pos: "bottom" },
             { sel: "#themeToggleBtn", rank: 15, title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой. Как тебе удобнее читать.", pos: "bottom" },
             { sel: "#userDocsBtn", rank: 16, title: "Кнопка «?»", text: "Это полная инструкция — нажми, если что-то непонятно. Она есть на русском, английском и французском (язык как у страницы); если перевод не подгрузился — покажется русская версия. Там же можно снова показать эти подсказки.", pos: "bottom" },

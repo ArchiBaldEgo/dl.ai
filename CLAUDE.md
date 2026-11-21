@@ -164,7 +164,13 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
 - `MOSCOW_TZ` из `ai/constants.py` + `timezone.localtime()`; никогда не хардкодить
   `+ timedelta(hours=3)`.
 - Model selector: топ-1 фаворит юзера (`_get_user_top_model_keys`, gated `AIAppSettings.
-  favorites_epoch`) первой, дальше строго алфавит по title.
+  favorites_epoch`) — отдельной группой «Часто используемые» сверху; группа «Все модели» и
+  `OR_*`-экспериментальные — по убыванию качества (`ai/services/model_stats.py::quality_scores`,
+  в JS зеркало `sortModelOptionsByStats`), модели без статистики — в конце по title; дефолт без
+  фаворита — лучшая по качеству, `DEFAULT_MODEL_KEY` — только когда статистики нет вовсе.
+  Порядок и цифры: чат — глобальный агрегат (`ai:available_models` data-атрибуты), «Реши
+  задачу»/«В чём ошибка» — пересортировка по выбранному языку[, теме] из `/ai/api/model-stats/`.
+  Пользовательского переключателя режима сортировки нет (не возвращать).
 - `ExternalAuthMiddleware` — stale-while-revalidate: кэш identity отдаётся сразу,
   dl.gsu.by обновляется фоновым daemon-потоком (L2 `django.core.cache`, lock +
   tombstone на 401); блокирующий запрос — только когда кэша нет вовсе
