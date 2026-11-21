@@ -19,7 +19,12 @@ class CheckAiForm(forms.Form):
         label="Текст решения",
         required=False,
         strip=False,
-        widget=forms.Textarea(attrs={"rows": 10, "cols": 80}),
+        widget=forms.Textarea(attrs={
+    "style": (
+        "display: block; clear: both; width: 100%; box-sizing: border-box; "
+        "height: 55vh; resize: vertical;"
+    ),
+}),
     )
     file = forms.FileField(
         label="Файл решения",
