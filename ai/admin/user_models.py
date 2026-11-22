@@ -133,8 +133,10 @@ def admin_user_model_delete_view(request):
 def admin_user_model_access_view(request):
     """Изменить доступ к модели (владелец или суперюзер): только доступ.
 
-    Тело — ``{id, is_public, shared_with: [id…]}``. Конфигурационные поля
-    (URL, ключ, провайдер, модель, лимиты) этой операцией не меняются.
+    Тело — ``{id, is_public, public_request, shared_with: [id…]}``.
+    Владелец управляет только заявкой (``public_request``), суперюзер —
+    решением (``is_public``: True одобрить / False отклонить). Остальные
+    конфигурационные поля этой операцией не меняются.
     """
     if not can_access_user_models(request) or not request.user.is_authenticated:
         return _forbid()
@@ -146,7 +148,7 @@ def admin_user_model_access_view(request):
         return _forbid("Некорректный запрос", status=400)
     ok, message = set_user_model_access(
         request.user, payload.get("id"), payload.get("is_public"),
-        payload.get("shared_with"),
+        payload.get("shared_with"), public_request=payload.get("public_request"),
     )
     if not ok:
         status = 404 if message == "Модель не найдена" else 400

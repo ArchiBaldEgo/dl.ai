@@ -54,8 +54,11 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
     `ai/services/pdf_upload.py`;
   - доступ к личным AI-моделям (свои/shared/public, поиск получателя, правка
     доступа суперюзером) → `ai/services/user_models.py` + `ai/services/
-    user_directory.py` (DL-id/ФИО); ключи/endpoint'ы чужих моделей суперюзеру
-    не показываются;
+    user_directory.py` (DL-id/ФИО); суперюзер видит провайдера и ID модели,
+    но не endpoint'ы/ключи чужих моделей. Публикация «всем» — только после
+    ручного одобрения суперюзером (`public_requested` → `is_public`);
+    правка provider/model_id/base_url/ключа опубликованной модели снимает
+    публикацию и требует новой заявки;
   - авто-роль «Разработчик» при поручении таска (поиск исполнителя
     `tasks/users/search/`, зачисление при назначении, снятие после закрытия
     последнего активного таска) → `ai/services/task_developers.py`; маркер

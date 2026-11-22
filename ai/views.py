@@ -869,8 +869,9 @@ def my_model_delete_view(request):
 def my_model_access_view(request):
     """Изменить доступ к модели (клиентская страница): владелец/суперюзер.
 
-    Тело — ``{id, is_public, shared_with: [id…]}``. Меняются ТОЛЬКО эти два
-    поля: конфигурация и ключи модели этой операцией не трогаются.
+    Тело — ``{id, is_public, public_request, shared_with: [id…]}``.
+    Владелец управляет заявкой (``public_request``), суперюзер — решением
+    (``is_public``). Конфигурация и ключи модели этой операцией не трогаются.
     """
     if not _has_page_access(request):
         return _deny_access(request, as_json=True)
@@ -882,7 +883,7 @@ def my_model_access_view(request):
         return JsonResponse({"ok": False, "message": "Некорректный запрос"}, status=400)
     ok, message = set_user_model_access(
         request.user, payload.get("id"), payload.get("is_public"),
-        payload.get("shared_with"),
+        payload.get("shared_with"), public_request=payload.get("public_request"),
     )
     if not ok:
         status = 404 if message == "Модель не найдена" else 400

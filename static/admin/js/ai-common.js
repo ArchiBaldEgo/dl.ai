@@ -311,21 +311,30 @@ function updateScopedModelStats() {
         });
 }
 
-// Человекочитаемый суффикс названия: «Model X␣␣␣␣66␣·␣␣12» — только целые
-// числа (десятичные отбрасываются), данные прижаты вправо и выровнены в один
-// столбец. Знаки единиц (% и сек) в строках НЕ повторяются — они показаны
-// один раз в заголовке группы, выровненные над колонками (см.
-// applyModelGroupUnitLabels).
-// Название добивается неразрывными пробелами до пиксельной ширины самого
-// длинного названия (замер canvas'ом шрифтом селекта; canvas недоступен →
-// добивание посимвольно), процент и время — до одинаковой символьной ширины
-// блока (выравнивание вправо). Если данных по модели нет вообще — суффикс
-// не показывается (голое название); если есть только один показатель —
-// показывается только он на своём месте в общем столбце. Идемпотентен:
-// базовое название кешируется в data-base-title при первом проходе.
+// Человекочитаемый суффикс названия: «Model X    95% · 12с» — только целые
+// числа (десятичные отбрасываются). Процент и секунды — ДВЕ независимые
+// колонки, прижатые вправо; единицы (% и с) стоят в КАЖДОЙ строке сразу за
+// числом, поэтому их глифы тоже образуют ровные столбцы. В заголовке группы
+// единиц нет: подпись браузер рендерит отдельной строкой с другим отступом,
+// и над колонками опций она строго не встаёт.
+//
+// Выравнивание — по ПИКСЕЛЯМ, не по числу символов: в пропорциональном
+// шрифте пробел (~3.5px) и цифра (~7.9px) разной ширины, поэтому «95» и
+// «100» съезжали, а секунды уезжали вслед за процентом. Добиваем строку
+// набором пробелов разной ширины (figure space = ширина цифры, NBSP, thin,
+// hair) до вычисленной колонки — точность меньше пикселя. Canvas недоступен
+// → посимвольный запасной вариант (приблизительно). Если данных по модели
+// нет вообще — суффикс не показывается (голое название); если есть только
+// один показатель — показывается только он, но колонки не смещаются.
+// Идемпотентен: базовое название кешируется в data-base-title.
 
 // Неразрывный пробел: обычные пробелы в <option> схлопываются, NBSP — нет.
 var NBSP = '\u00A0';
+// Figure space (U+2007) по метрике равен цифре; thin/hair — для остатка
+// меньше пробела.
+var FIGURE_SPACE = '\u2007';
+var THIN_SPACE = '\u2009';
+var HAIR_SPACE = '\u200A';
 // Минимальный зазор название → столбец данных, в NBSP.
 var MODEL_STAT_GAP_MIN = 3;
 
@@ -334,9 +343,8 @@ var _statMeasureCtx = null;
 // Ширина текста шрифтом селекта моделей — для пиксельного добивания названий
 // до одного столбца. Canvas measureText даёт метрику того же шрифта, которым
 // рендерятся опции. Недоступен → 0, вызывающий код падает на посимвольный
-// запасной вариант. weightOverride — для заголовков групп (браузер рендерит
-// их жирным).
-function measureStatText(text, weightOverride) {
+// запасной вариант.
+function measureStatText(text) {
     var select = document.getElementById('select');
     if (!select || !document.createElement) return 0;
     if (!_statMeasureCtx) {
@@ -345,13 +353,43 @@ function measureStatText(text, weightOverride) {
     }
     if (!_statMeasureCtx) return 0;
     var style = window.getComputedStyle(select);
-    _statMeasureCtx.font = [style.fontStyle, weightOverride || style.fontWeight, style.fontSize, style.fontFamily].join(' ');
+    _statMeasureCtx.font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(' ');
     return _statMeasureCtx.measureText(text).width;
 }
 
-// n неразрывных пробелов (n <= 0 → пусто).
+// n неразрывных пробелов (посимвольный запасной вариант, n <= 0 → пусто).
 function padStat(n) {
     return n > 0 ? new Array(n + 1).join(NBSP) : '';
+}
+
+// Доступные пробельные символы и их ширина — от широких к узким. Figure
+// space в большинстве шрифтов равен ширине цифры, поэтому цифровые колонки
+// добиваются им без остатка; hair space закрывает остаток меньше пробела.
+function statSpaceUnits() {
+    var units = [];
+    [FIGURE_SPACE, NBSP, THIN_SPACE, HAIR_SPACE].forEach(function (ch) {
+        var w = measureStatText(ch);
+        if (w > 0.05) units.push({ ch: ch, w: w });
+    });
+    units.sort(function (a, b) { return b.w - a.w; });
+    return units;
+}
+
+// Пробелы ровно на targetPx с точностью меньше ширины самого узкого из
+// доступных пробелов. Отрицательное/нулевое → пусто.
+function padStatPx(targetPx, units) {
+    if (!(targetPx > 0) || !units.length) return '';
+    var out = '';
+    var remaining = targetPx;
+    for (var i = 0; i < units.length; i++) {
+        var w = units[i].w;
+        var count = Math.floor(remaining / w + 1e-6);
+        if (count > 0) {
+            out += new Array(count + 1).join(units[i].ch);
+            remaining -= count * w;
+        }
+    }
+    return out;
 }
 
 // Вешает суффикс на одну опцию по заранее посчитанным колонкам (cols).
@@ -359,61 +397,40 @@ function padStat(n) {
 // по ВСЕМ опциям селекта, иначе каждая строка выравнивалась бы сама по себе.
 // Столбец данных стартует от maxTitleW + минимальный зазор — иначе у самой
 // длинной строки зазор был бы, а у остальных нет, и столбец съезжал бы.
-// В строках только целые числа; единицы (% и сек) живут в заголовке группы.
+// Процент и секунды прижаты вправо; единицы идут сразу за числом.
 function applyModelOptionSuffix(item, cols) {
     var text = item.title;
-    if (item.hasStats) {
-        var gap = cols.nbspW > 0
-            ? Math.max(MODEL_STAT_GAP_MIN, Math.round((cols.maxTitleW + MODEL_STAT_GAP_MIN * cols.nbspW - item.titleW) / cols.nbspW))
-            : Math.max(MODEL_STAT_GAP_MIN, cols.maxTitleLen + MODEL_STAT_GAP_MIN - item.title.length);
-        text += padStat(gap);
+    if (!item.hasStats) {
+        item.opt.textContent = text;
+        return;
+    }
+    if (cols.pixels) {
+        text += padStatPx(cols.dataStart - item.titleW, cols.units);
         if (item.pct) {
-            text += padStat(cols.pctW - item.pct.length) + item.pct;
+            text += padStatPx(cols.pctW - item.pctW, cols.units) + item.pct + '%';
+        } else if (item.sec) {
+            // Процента нет — молча резервируем его колонку (цифры + «%» +
+            // разделитель), чтобы секунды стояли в общем столбце.
+            text += padStatPx(cols.pctW + cols.pctUnitW + cols.sepW, cols.units);
         }
         if (item.sec) {
-            text += (item.pct ? NBSP + '·' + NBSP : '') + padStat(cols.secW - item.sec.length) + item.sec;
+            if (item.pct) text += cols.separator;
+            text += padStatPx(cols.secW - item.secW, cols.units) + item.sec + cols.secUnit;
+        }
+    } else {
+        // Запасной посимвольный вариант (canvas/шрифт недоступны).
+        text += padStat(Math.max(MODEL_STAT_GAP_MIN, cols.maxTitleLen + MODEL_STAT_GAP_MIN - item.title.length));
+        if (item.pct) {
+            text += padStat(cols.pctChars - item.pct.length) + item.pct + '%';
+        } else if (item.sec) {
+            text += padStat(cols.pctChars + 4);  // «%» и « · »
+        }
+        if (item.sec) {
+            if (item.pct) text += NBSP + '·' + NBSP;
+            text += padStat(cols.secChars - item.sec.length) + item.sec + cols.secUnit;
         }
     }
     item.opt.textContent = text;
-}
-
-// Единицы (% и сек) показываются ОДИН РАЗ — в заголовках групп селектора,
-// и ВЫРОВНЕНЫ над колонками показателей: подпись группы добивается NBSP до
-// начала столбца данных (тот же пиксельный замер, что у строк; заголовок
-// браузер рендерит жирным — меряем жирным), знак «%» прижат вправо внутри
-// колонки процента, «с» — внутри колонки секунд, разделитель «·» стоит на
-// колонке строк. Базовые подписи групп кешируются в data-base-label;
-// суффикс вешается только группам, у которых есть строки со статистикой,
-// и снимается при закрытии списка (stripModelOptionSuffixes) — закрытый
-// селектор и поиск группы по подписи («Все модели») не ломаются.
-function applyModelGroupUnitLabels(modelSelect, items, cols) {
-    var secUnit = getUiString('statSeconds', 'с');
-    Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup'), function (group) {
-        if (!group.hasAttribute('data-base-label')) {
-            group.setAttribute('data-base-label', group.label);
-        }
-        var base = group.getAttribute('data-base-label');
-        var hasStats = items.some(function (item) { return item.opt.parentElement === group; });
-        if (!hasStats) {
-            if (group.label !== base) group.label = base;
-            return;
-        }
-        var gap;
-        if (cols.nbspW > 0) {
-            var colStart = cols.maxTitleW + MODEL_STAT_GAP_MIN * cols.nbspW;
-            var labelW = measureStatText(base, 'bold');
-            // Минимум 1 NBSP (не лепить знак к подписи), но приоритет —
-            // точное попадание над колонкой, поэтому без MODEL_STAT_GAP_MIN.
-            gap = Math.max(1, Math.round((colStart - labelW) / cols.nbspW));
-        } else {
-            gap = Math.max(1, cols.maxTitleLen + MODEL_STAT_GAP_MIN - base.length);
-        }
-        var next = base + padStat(gap)
-            + padStat(Math.max(0, cols.pctW - 1)) + '%'
-            + NBSP + '·' + NBSP
-            + padStat(Math.max(0, cols.secW - secUnit.length)) + secUnit;
-        if (group.label !== next) group.label = next;
-    });
 }
 
 // Суффиксы доступны на всех клиентских страницах, где есть селектор моделей:
@@ -432,7 +449,11 @@ function applyModelOptionSuffixes() {
     var modelSelect = document.getElementById('select');
     if (!modelSelect || !modelSuffixesEnabled()) return;
     var items = [];
-    var cols = { maxTitleW: 0, maxTitleLen: 0, pctW: 0, secW: 0, nbspW: 0 };
+    var cols = {
+        maxTitleW: 0, maxTitleLen: 0,
+        pctW: 0, pctChars: 0, secW: 0, secChars: 0,
+        nbspW: 0, pixels: false, units: [],
+    };
     Array.prototype.forEach.call(modelSelect.options, function (opt) {
         if (!opt.value) return;  // заглушка «Сегодня нет доступных моделей» — не модель
         if (!opt.hasAttribute('data-base-title')) {
@@ -443,25 +464,41 @@ function applyModelOptionSuffixes() {
         var item = {
             opt: opt,
             title: title,
-            // Десятичные отбрасываем (Math.floor) — в строках целые числа;
-            // знаки единиц (% и сек) не дублируем в каждой строке.
+            // Десятичные отбрасываем (Math.floor) — в строках целые числа.
             pct: stats.percentSolved !== null ? String(Math.floor(stats.percentSolved)) : '',
             sec: stats.avgSeconds !== null ? String(Math.floor(stats.avgSeconds)) : '',
         };
         item.hasStats = !!(item.pct || item.sec);
-        if (item.hasStats) {
-            item.titleW = measureStatText(title);
-            cols.maxTitleW = Math.max(cols.maxTitleW, item.titleW);
-            cols.maxTitleLen = Math.max(cols.maxTitleLen, title.length);
-            if (item.pct) cols.pctW = Math.max(cols.pctW, item.pct.length);
-            if (item.sec) cols.secW = Math.max(cols.secW, item.sec.length);
-            items.push(item);
+        if (!item.hasStats) return;
+        item.titleW = measureStatText(title);
+        item.pctW = item.pct ? measureStatText(item.pct) : 0;
+        item.secW = item.sec ? measureStatText(item.sec) : 0;
+        cols.maxTitleW = Math.max(cols.maxTitleW, item.titleW);
+        cols.maxTitleLen = Math.max(cols.maxTitleLen, title.length);
+        if (item.pct) {
+            cols.pctW = Math.max(cols.pctW, item.pctW);
+            cols.pctChars = Math.max(cols.pctChars, item.pct.length);
         }
+        if (item.sec) {
+            cols.secW = Math.max(cols.secW, item.secW);
+            cols.secChars = Math.max(cols.secChars, item.sec.length);
+        }
+        items.push(item);
     });
     if (!items.length) return;
-    cols.nbspW = measureStatText(NBSP) || measureStatText(' ');
+    cols.units = statSpaceUnits();
+    cols.nbspW = measureStatText(NBSP);
+    cols.secUnit = getUiString('statSeconds', 'с');
+    // Пиксельная раскладка возможна, только если шрифт замеряется и есть
+    // хотя бы один пробельный символ ненулевой ширины.
+    cols.pixels = cols.units.length > 0 && cols.nbspW > 0;
+    if (cols.pixels) {
+        cols.dataStart = cols.maxTitleW + MODEL_STAT_GAP_MIN * cols.nbspW;
+        cols.pctUnitW = measureStatText('%');
+        cols.separator = NBSP + '·' + NBSP;
+        cols.sepW = measureStatText(cols.separator);
+    }
     items.forEach(function (item) { applyModelOptionSuffix(item, cols); });
-    applyModelGroupUnitLabels(modelSelect, items, cols);
 }
 
 // Обратное применение: закрытый селектор показывает чистые названия
@@ -473,11 +510,6 @@ function stripModelOptionSuffixes() {
     Array.prototype.forEach.call(modelSelect.options, function (opt) {
         var base = opt.getAttribute('data-base-title');
         if (base !== null) opt.textContent = base;
-    });
-    // Заголовки групп: вернуть базовые подписи без суффикса единиц (%·с) —
-    // закрытый селектор показывает чистые названия.
-    Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup[data-base-label]'), function (group) {
-        group.label = group.getAttribute('data-base-label');
     });
 }
 
@@ -544,7 +576,7 @@ function initModelSelectorStats() {
     // пуста/отсутствует: пустой каталог не должен выключать цифры у
     // оставшихся опций (раньше ранний return по отсутствующему элементу
     // сортировки выключал цифры везде).
-    // Цифры статистики (целые; единицы «% · с» — на заголовке группы) видны
+    // Цифры статистики (целые; единицы «%» и «с» — в каждой строке) видны
     // ТОЛЬКО в развёрнутом списке: нативный select рендерит опции в момент
     // открытия, поэтому суффиксы вешаем на открытие (mousedown — мышь,
     // keydown — клавиатура: Enter/Space/стрелки/F4) и снимаем при закрытии
@@ -2768,9 +2800,6 @@ function applySharedUiLanguageTexts() {
         Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup[data-ai-group]'), function (group) {
             var label = groupLabels[group.getAttribute('data-ai-group')];
             if (!label) return;
-            // data-base-label — база суффиксов статистики (applyModelGroupUnitLabels);
-            // меняем оба поля согласованно, иначе суффикс прицепится к старой подписи.
-            group.setAttribute('data-base-label', label);
             group.label = label;
         });
         var noModelsOpt = modelSelect.querySelector('option[value=""]');

@@ -10875,6 +10875,44 @@ class RequestLogSearchTests(TestCase):
         self.assertIn(self.log_b, rows)
         self.assertNotIn(self.log_a, rows)
 
+    def test_user_model_filter_matches_key_and_title(self):
+        from django.db import connection as db_connection
+        if db_connection.vendor == "sqlite":
+            self.skipTest("JSON contains не поддерживается sqlite")
+        from ai.models import AIUserModel
+        owner = get_user_model().objects.create_user(username="log-um", password="x")
+        model = AIUserModel.objects.create(
+            user=owner, title="Личная модель", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m",
+        )
+        key = f"User_{model.pk}"
+        by_key = AIRequestLog.objects.create(
+            user=owner, model_names=[key], message="ошибка",
+            status=AIRequestLog.STATUS_ERROR, sent_at=timezone.now(),
+        )
+        by_title = AIRequestLog.objects.create(
+            user=owner, model_names=[model.title], message="успех",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        rows = self._list({"model": key})
+        self.assertIn(by_key, rows)
+        self.assertIn(by_title, rows)
+
+    def test_model_choices_include_user_models(self):
+        from ai.models import AIUserModel
+        from ai.admin.request_logs import admin_request_logs_view
+        owner = get_user_model().objects.create_user(username="log-um2", password="x")
+        model = AIUserModel.objects.create(
+            user=owner, title="Личная в фильтре",
+            provider=AIUserModel.PROVIDER_OPENAI, model_id="m",
+        )
+        request = self.factory.get("/ai/admin/ai/request_logs/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_request_logs_view(request)
+        keys = [row["key"] for row in response.context_data["model_choices"]]
+        self.assertIn(f"User_{model.pk}", keys)
+
     def test_user_filter_matches_full_name(self):
         rows = self._list({"user": "Тестов"})
         self.assertEqual(rows, [self.log_b])
@@ -11542,6 +11580,20 @@ class ModelStatsSuffixStripTests(SimpleTestCase):
         src = self._source()
         self.assertIn("selectPointerActive = true", src)
         self.assertIn("if (!onModelSelect || !selectPointerActive)", src)
+
+    def test_stat_columns_aligned_by_pixels(self):
+        """Процент и секунды — две независимые колонки; добивка идёт по
+        пикселям (figure space = ширина цифры + NBSP/thin/hair), а не по
+        числу символов: в пропорциональном шрифте пробел и цифра разной
+        ширины, из-за чего колонки съезжали. Единицы стоят в каждой строке,
+        заголовки групп не мутируются (опции в нативном списке отрисованы с
+        другим отступом, чем подпись optgroup)."""
+        src = self._source()
+        self.assertIn("function padStatPx(", src)
+        self.assertIn("var FIGURE_SPACE = '\\u2007';", src)
+        self.assertIn("cols.separator = NBSP + '·' + NBSP;", src)
+        self.assertNotIn("applyModelGroupUnitLabels", src)
+        self.assertNotIn("data-base-label", src)
 
 
 # ===================================================================
@@ -22583,7 +22635,7 @@ class UserModelSharingCrudTests(TestCase):
         payload.update(overrides)
         return payload
 
-    def test_owner_can_set_access(self):
+    def test_owner_requests_public_access(self):
         from ai.services.user_models import save_user_model
         ok, message, _ = save_user_model(self.owner, self._payload(
             is_public=True,
@@ -22591,7 +22643,10 @@ class UserModelSharingCrudTests(TestCase):
         ))
         self.assertTrue(ok, message)
         self.model.refresh_from_db()
-        self.assertTrue(self.model.is_public)
+        # Публичность НЕ включается сразу: создаётся заявка на модерацию.
+        self.assertFalse(self.model.is_public)
+        self.assertTrue(self.model.public_requested)
+        self.assertIsNone(self.model.public_reviewed_at)
         self.assertEqual(
             set(self.model.shared_with.values_list("pk", flat=True)),
             {self.friend.pk, self.friend2.pk},
@@ -22739,15 +22794,159 @@ class UserModelSuperuserAccessTests(_AdminViewRequestMixin, TestCase):
             delattr(self.superuser, "_ai_view_as_group_pk")
         self.assertEqual(response.status_code, 404)
 
-    def test_all_models_rows_have_no_config_fields(self):
+    def test_all_models_rows_show_identity_but_not_secrets(self):
         from ai.services.user_models import admin_user_model_rows
         rows = admin_user_model_rows()
         row = next(item for item in rows if item["id"] == self.model.pk)
         self.assertEqual(row["owner_display"], "su-owner")
+        # Суперюзер должен понимать, что одобряет: провайдер и ID видны.
+        self.assertEqual(row["provider"], "openai")
+        self.assertEqual(row["provider_label"], "OpenAI")
+        self.assertEqual(row["model_id"], "orig-model")
+        # Endpoint, ключи и настройки чужих моделей — по-прежнему скрыты.
         for forbidden in ("base_url", "api_key", "api_key_encrypted",
-                          "model_id", "provider", "max_tokens",
-                          "supports_vision", "supports_think"):
+                          "max_tokens", "supports_vision", "supports_think"):
             self.assertNotIn(forbidden, row)
+
+
+class UserModelPublicModerationTests(TestCase):
+    """Публикация «для всех» — только после одобрения суперюзером."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="mod-owner", password="x")
+        self.other = User.objects.create_user(username="mod-other", password="x")
+        self.superuser = User.objects.create_superuser(
+            username="mod-su", password="x", email="mod-su@t.com",
+        )
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Модерация", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m", base_url="https://api.openai.com/v1",
+        )
+        self.key = f"User_{self.model.pk}"
+
+    def _payload(self, **overrides):
+        payload = {
+            "id": self.model.pk, "title": "Модерация", "provider": "openai",
+            "model_id": "m", "max_tokens": 8000, "is_active": True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_pending_is_not_public_for_anyone_else(self):
+        from ai.services.user_models import (
+            find_user_model, public_user_models_for, set_user_model_access,
+        )
+        ok, message = set_user_model_access(
+            self.owner, self.model.pk, public_request=True,
+        )
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+        self.assertTrue(self.model.public_requested)
+        self.assertIsNone(find_user_model(self.other, self.key))
+        self.assertEqual(public_user_models_for(self.other), [])
+
+    def test_superuser_approves_publication(self):
+        from ai.services.user_models import (
+            find_user_model, public_status_for, set_user_model_access,
+        )
+        set_user_model_access(self.owner, self.model.pk, public_request=True)
+        ok, message = set_user_model_access(self.superuser, self.model.pk, is_public=True)
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertFalse(self.model.public_requested)
+        self.assertEqual(self.model.public_reviewed_by_id, self.superuser.pk)
+        self.assertIsNotNone(self.model.public_reviewed_at)
+        self.assertEqual(public_status_for(self.model), "public")
+        self.assertIsNotNone(find_user_model(self.other, self.key))
+
+    def test_superuser_rejects_and_owner_can_request_again(self):
+        from ai.services.user_models import set_user_model_access
+        set_user_model_access(self.owner, self.model.pk, public_request=True)
+        ok, message = set_user_model_access(self.superuser, self.model.pk, is_public=False)
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+        self.assertFalse(self.model.public_requested)
+        self.assertIsNotNone(self.model.public_reviewed_at)
+        self.assertEqual(self.model.public_reviewed_by_id, self.superuser.pk)
+
+        ok, message = set_user_model_access(
+            self.owner, self.model.pk, public_request=True,
+        )
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.public_requested)
+        self.assertIsNone(self.model.public_reviewed_at)
+        self.assertIsNone(self.model.public_reviewed_by_id)
+
+    def test_config_change_revokes_existing_publication(self):
+        from ai.services.user_models import save_user_model, set_user_model_access
+        set_user_model_access(self.superuser, self.model.pk, is_public=True)
+        ok, message, _ = save_user_model(self.owner, self._payload(model_id="changed"))
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+        self.assertFalse(self.model.public_requested)
+        self.assertIsNone(self.model.public_reviewed_at)
+        self.assertIsNone(self.model.public_reviewed_by_id)
+
+    def test_owner_is_forbidden_to_approve_own_model(self):
+        from ai.services.user_models import set_user_model_access
+        ok, message = set_user_model_access(self.owner, self.model.pk, is_public=True)
+        self.assertFalse(ok)
+        self.assertIn("суперпользователь", message)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+
+
+class UserModelJournalHelpersTests(TestCase):
+    """Журнал запросов: личные модели показываются и фильтруются по-человечески."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        User = get_user_model()
+        self.owner = User.objects.create_user(
+            username="log-owner", password="x", first_name="Иван", last_name="Тестов",
+        )
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Личная Qwen", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="qwen-local",
+        )
+        self.key = f"User_{self.model.pk}"
+
+    def test_raw_key_is_rendered_as_readable_label(self):
+        from ai.services.user_models import format_model_names
+        text = format_model_names([self.key])
+        self.assertIn("Личная Qwen", text)
+        self.assertIn("Иван Тестов", text)
+        self.assertIn("(личная)", text)
+        self.assertNotIn(self.key, text)
+
+    def test_deleted_model_key_is_not_raw(self):
+        from ai.services.user_models import format_model_names
+        self.model.delete()
+        text = format_model_names([self.key])
+        self.assertIn("удалённая личная модель", text)
+
+    def test_filter_choices_include_user_models(self):
+        from ai.services.user_models import user_model_filter_choices
+        choices = user_model_filter_choices()
+        row = next(item for item in choices if item["key"] == self.key)
+        self.assertIn("Личная Qwen", row["title"])
+
+    def test_journal_row_uses_readable_label(self):
+        from ai.admin.request_logs import build_log_table_row
+        log = AIRequestLog.objects.create(
+            user=self.owner, model_names=[self.key], message="привет",
+            source=AIRequestLog.SOURCE_WEBSOCKET, sent_at=timezone.now(),
+        )
+        row = build_log_table_row(log)
+        self.assertIn("Личная Qwen", row["model_display"])
+        self.assertNotIn(self.key, row["model_display"])
 
 
 class UserSearchTests(TestCase):
@@ -23017,12 +23216,22 @@ class UserModelClientAccessViewTests(TestCase):
                    return_value=external_id):
             return my_model_access_view(request)
 
-    def test_owner_sets_public(self):
-        response = self._post(self.owner, {"id": self.model.pk, "is_public": True,
+    def test_owner_requests_publication(self):
+        response = self._post(self.owner, {"id": self.model.pk,
+                                           "public_request": True,
                                            "shared_with": []})
         self.assertEqual(response.status_code, 200)
         self.model.refresh_from_db()
-        self.assertTrue(self.model.is_public)
+        self.assertFalse(self.model.is_public)
+        self.assertTrue(self.model.public_requested)
+
+    def test_owner_cannot_publish_directly(self):
+        response = self._post(self.owner, {"id": self.model.pk, "is_public": True,
+                                           "shared_with": []})
+        self.assertEqual(response.status_code, 400)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+        self.assertFalse(self.model.public_requested)
 
     def test_foreign_private_model_is_not_found(self):
         response = self._post(self.other, {"id": self.model.pk, "is_public": True,
@@ -27911,6 +28120,24 @@ class PromptLabAdminTests(_AdminViewRequestMixin, TestCase):
         group.users.add(user)
         response = self._call(user, admin_prompt_lab_view)
         self.assertEqual(response.status_code, 200)
+
+    def test_css_follows_admin_theme(self):
+        """Лаборатория не хардкодит светлые цвета: иначе тёмная тема белая."""
+        from pathlib import Path
+        from django.conf import settings
+        from django.template.loader import get_template
+
+        source = get_template(
+            "admin/ai/prompt_lab.html",
+        ).template.source
+        self.assertIn("prompt_lab/index.css' %}?v=2", source)
+        css = (
+            Path(settings.BASE_DIR) / "static/admin/ai/prompt_lab/index.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn("var(--body-bg)", css)
+        self.assertIn("var(--darkened-bg)", css)
+        for hardcoded in ("#fff", "#ffffff", "#ddd", "#f6f6f6"):
+            self.assertNotIn(hardcoded, css.lower())
 
     def test_start_endpoint_rejects_empty_payload(self):
         from ai.admin.prompt_lab import admin_prompt_lab_start_view

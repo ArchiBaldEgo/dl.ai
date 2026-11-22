@@ -5,7 +5,8 @@
 запроса, ответ модели (лениво — AJAX по первому клику, ответ может быть
 мегабайтным) и действия.
 
-Ожидает в контексте: log (запись журнала — AIRequestLog).
+Ожидает в контексте: log (запись журнала — AIRequestLog) и
+model_display (подпись моделей; сырые User_<pk> уже развёрнуты сервисом).
 Раскрытие — static/admin/ai/request_logs/index.js (делегирование по
 .ai-log-row), ленивый ответ — .ai-log-response-body[data-response-url].
 {% endcomment %}
@@ -22,7 +23,7 @@
           <div><strong>ID:</strong> {{ log.id }}</div>
           <div><strong>Источник:</strong> {{ log.get_source_display|default:"—" }}</div>
           <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
-          <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
+          <div><strong>Модель:</strong> {{ model_display|default:"—" }}</div>
           <div><strong>Статус:</strong> {{ log.get_status_display }}</div>
           <div><strong>Время ответа:</strong> {% if log.duration_seconds %}{{ log.duration_seconds|human_duration }}{% else %}—{% endif %}</div>
           <div><strong>Токенов:</strong> {{ log.tokens|default:"—" }}</div>
