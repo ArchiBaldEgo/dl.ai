@@ -4830,14 +4830,15 @@ def start_batch_solve_run(node_ids, model_keys, user_id, session_id, *, ui_langu
         SendSolutionRequest.fileName); пусто — DL назовёт файл сам.
     """
     handlers = get_runtime_model_handlers()
-    # В solve допущены только Web_* и Ollama_* (нет жёсткого лимита вывода);
-    # OR_*/Groq отрезаются — не вытягивают по токенам пакетную генерацию кода.
+    # В solve допущены Web_*, Ollama_* и OR_* (OpenRouter — ради статистики;
+    # его max_tokens=8000 может обрезать длинный код, это ожидаемо). Groq
+    # отрезается — дневные лимиты.
     if model_keys:
         valid_model_keys = [k for k in model_keys if k in handlers and is_arm_solve_model(k)]
     else:
         valid_model_keys = [k for k in handlers.keys() if is_arm_solve_model(k)]
     if not valid_model_keys:
-        return None, "Нет доступных моделей для solve (Web/Ollama). Обновите состояние моделей и попробуйте снова."
+        return None, "Нет доступных моделей для solve (Web/Ollama/OpenRouter). Обновите состояние моделей и попробуйте снова."
 
     if not node_ids:
         return None, "Не выбрано ни одной задачи из дерева DL."
@@ -4993,7 +4994,7 @@ def start_batch_rerun_pairs(run_id, user_id, session_id):
     if not rerun_pairs:
         return None, "Все пары решены — перезапускать нечего", []
 
-    # Модели перезапуска: только доступные сейчас (Web/Ollama). Недоступные
+    # Модели перезапуска: только доступные сейчас (Web/Ollama/OpenRouter). Недоступные
     # отбрасываются и возвращаются списком (их пары остаются нерешёнными).
     wanted_models = {k for keys in rerun_pairs.values() for k in keys}
     handlers = get_runtime_model_handlers()
@@ -5004,7 +5005,7 @@ def start_batch_rerun_pairs(run_id, user_id, session_id):
     ]
     dropped_models = sorted(wanted_models - {m["key"] for m in ordered_models})
     if not ordered_models:
-        return (None, "Нет доступных моделей для перезапуска (Web/Ollama): "
+        return (None, "Нет доступных моделей для перезапуска (Web/Ollama/OpenRouter): "
                 + ", ".join(dropped_models), dropped_models)
 
     # Пары, чья модель unavailable, вылетают целиком.

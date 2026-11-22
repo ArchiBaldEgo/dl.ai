@@ -166,14 +166,18 @@ on :3000 / :3001). Groq and SambaNova are registered only when `AI_ENABLE_GROQ` 
 - Escape любого user/model HTML перед `innerHTML` (think-блоки модели отдают сырыми).
 - `MOSCOW_TZ` из `ai/constants.py` + `timezone.localtime()`; никогда не хардкодить
   `+ timedelta(hours=3)`.
-- Model selector: топ-1 фаворит юзера (`_get_user_top_model_keys`, gated `AIAppSettings.
-  favorites_epoch`) — отдельной группой «Часто используемые» сверху; группа «Все модели» и
-  `OR_*`-экспериментальные — по убыванию качества (`ai/services/model_stats.py::quality_scores`,
-  в JS зеркало `sortModelOptionsByStats`), модели без статистики — в конце по title; дефолт без
-  фаворита — лучшая по качеству, `DEFAULT_MODEL_KEY` — только когда статистики нет вовсе.
-  Порядок и цифры: чат — глобальный агрегат (`ai:available_models` data-атрибуты), «Реши
-  задачу»/«В чём ошибка» — пересортировка по выбранному языку[, теме] из `/ai/api/model-stats/`.
-  Пользовательского переключателя режима сортировки нет (не возвращать).
+- Model selector: ОДИН плоский список (групп «Часто используемые»/«Все модели»/
+  «Экспериментальные» нет — не возвращать). Порядок — по убыванию качества
+  (`ai/services/model_stats.py::quality_scores`; сервер — `ai/views.py::_build_model_selector`,
+  в JS зеркало `sortModelOptionsByStats`, сортирует прямые `<option>` перед optgroup'ами личных
+  моделей), без статистики — в конце по title. Дефолт: на «Реши задачу»/«В чём ошибка» — лучшая
+  по СОХРАНЁННОМУ языку (`ai_state.progLng`), иначе глобальный агрегат; `DEFAULT_MODEL_KEY` —
+  только когда статистики нет вовсе. Цифры показываются ТОЛЬКО у фактического скоупа (язык
+  [+тема] на задачных страницах); в чате и в глобальном фолбэке их нет (`displayStatsForOption`
+  vs `rankingStatsForOption`). Авто-выбор при смене языка — только если модель не выбрана
+  вручную (`ai_state.modelAuto`: 1 = авто, 0/нет флага = ручной; `selectBestModelForScope`),
+  при выбранной теме авто-выбор не делается. Пользовательского переключателя режима сортировки
+  нет (не возвращать).
 - `ExternalAuthMiddleware` — stale-while-revalidate: кэш identity отдаётся сразу,
   dl.gsu.by обновляется фоновым daemon-потоком (L2 `django.core.cache`, lock +
   tombstone на 401); блокирующий запрос — только когда кэша нет вовсе
@@ -219,7 +223,6 @@ Management-команды (см. `--help`):
   (`--model`, `--overwrite`, `--lang fr`, `--dry-run`).
 - `translate_prompts` — LLM-перевод Prompt/SharedPrompt через зарегистрированный хендлер
   (заполняет пустые, `--overwrite`).
-- `reset_favorites_epoch` — сбрасывает топ-1 фаворитов всех юзеров (логи не удаляются).
 - `reset_model_stats` — deletes all `AIModelStats` (cumulative avg-seconds/percent-solved
   в суффиксах селектора). После смены семантики duration: duration пары = ТОЛЬКО вызов
   модели, не DL-поллинг/лока. Скоупы stats (модель×язык×тема + легаси) — gotchas-deep.

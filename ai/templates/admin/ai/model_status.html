@@ -48,6 +48,7 @@
           <th>Модель</th>
           <th>Состояние</th>
           <th>Возможности</th>
+          <th>Оплата</th>
           <th>Код ответа</th>
           <th>Расшифровка</th>
           <th>Дата окна</th>
@@ -77,6 +78,11 @@
               <span class="cap {{ row.cap_classes.vision.class }}" title="{{ row.cap_classes.vision.title }}">Зрение</span>
               <span class="cap {{ row.cap_classes.reasoning.class }}" title="{{ row.cap_classes.reasoning.title }}">Рассуждения</span>
             </td>
+            <td>
+              {% if row.billing_label %}
+                <span class="billing billing-{{ row.billing }}">{{ row.billing_label }}</span>
+              {% else %}—{% endif %}
+            </td>
             <td>{{ row.last_http_code|default:"—" }}</td>
             <td>{{ row.last_http_code_label|default:"—" }}</td>
             <td>
@@ -104,6 +110,8 @@
       Возможности: <span class="cap cap-on">зелёный</span> — есть у модели и реализовано в приложении;
       <span class="cap cap-on cap-unimplemented">зелёный зачёркнутый</span> — есть у модели, но не реализовано;
       <span class="cap cap-off">серый зачёркнутый</span> — у модели нет.
+      Оплата: <span class="billing billing-paid">Платная</span> — платим за токены;
+      <span class="billing billing-free">Бесплатная</span> — без оплаты.
     </p>
   </div>
 </div>

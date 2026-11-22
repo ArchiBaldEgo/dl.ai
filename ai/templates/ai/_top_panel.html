@@ -18,34 +18,14 @@ active_page ("chat"/"solve"/"find_error"); у my_models ни один режим
         </select>
         <select id="select">
             {% if available_models or user_models_options or shared_user_models or public_user_models %}
-                {% if favorite_models %}
-                    <optgroup data-ai-group="favorites" label="{{ t.favoritesGroup }}">
-                        {% for model in favorite_models %}
-                            <option value="{{ model.key }}" data-vision="{% if model.capabilities.vision %}1{% else %}0{% endif %}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
-                                {{ model.title }}
-                            </option>
-                        {% endfor %}
-                    </optgroup>
-                {% endif %}
-                {% if available_models %}
-                <optgroup data-ai-group="all" label="{{ t.allModelsGroup }}">
-                    {% for model in other_models %}
-                        <option value="{{ model.key }}" data-vision="{% if model.capabilities.vision %}1{% else %}0{% endif %}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}"{% if model.key == default_model_key %} selected{% endif %}>
-                            {{ model.title }}
-                        </option>
-                    {% endfor %}
-                </optgroup>
-                {% endif %}
-                <!-- Экспериментальные бесплатные модели (OpenRouter) — всегда самый низ селектора -->
-                {% if experimental_models %}
-                    <optgroup data-ai-group="experimental" label="{{ t.experimentalModelsGroup }}">
-                        {% for model in experimental_models %}
-                            <option value="{{ model.key }}" data-vision="{% if model.capabilities.vision %}1{% else %}0{% endif %}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}">
-                                {{ model.title }}
-                            </option>
-                        {% endfor %}
-                    </optgroup>
-                {% endif %}
+                <!-- Каталог — ОДИН плоский список по убыванию качества (см.
+                     ai/views.py::_build_model_selector). Групп «Часто
+                     используемые»/«Все модели»/«Экспериментальные» больше нет. -->
+                {% for model in available_models %}
+                    <option value="{{ model.key }}" data-vision="{% if model.capabilities.vision %}1{% else %}0{% endif %}" data-avg-seconds="{{ model.avg_seconds|default_if_none:'' }}" data-percent-solved="{{ model.percent_solved|default_if_none:'' }}"{% if model.key == default_model_key %} selected{% endif %}>
+                        {{ model.title }}
+                    </option>
+                {% endfor %}
                 <!-- Личные модели — три группы в самом низу селектора:
                      свои («Мои модели»), адресно выданные («Доступные мне»)
                      и публичные. Приватные чужие сюда не попадают; резолв

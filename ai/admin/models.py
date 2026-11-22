@@ -802,9 +802,8 @@ class SharedPromptAdmin(FastChangelistAdminMixin, _StaffOnlyAdminMixin, admin.Mo
 
 class AIAppSettingsAdmin(admin.ModelAdmin):
     list_display = ("is_enabled", "updated_at")
-    # favorites_epoch на форме не нужен (меняется только командой
-    # reset_favorites_epoch); updated_at — авторасчётное, тоже не редактируем.
-    exclude = ("favorites_epoch", "updated_at")
+    # updated_at — авторасчётное, не редактируем.
+    exclude = ("updated_at",)
     change_form_template = "admin/ai/aiappsettings_change_form.html"
 
     # Страница выдаваемая группам (ТЗ 2026-10-19): staff/super ИЛИ ключ

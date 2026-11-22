@@ -39,7 +39,7 @@ from django.conf import settings
 from .throttling import rate_limited
 from .model_health import get_available_model_options, trigger_model_health_refresh_async
 from .model_clients import registry
-from .model_clients.registry import DEFAULT_MODEL_KEY, EXPERIMENTAL_MODEL_PREFIXES
+from .model_clients.registry import DEFAULT_MODEL_KEY
 from .models import (
     AIUserModel, AIAppSettings, ExternalDLAccount, ProgrammingLanguage,
     Prompt, SharedPrompt, Topic,
@@ -120,104 +120,47 @@ from .serializers import (
 )
 
 
-def _get_user_top_model_keys(request, limit=1):
-    """Возвращает list of model_key для топ-N моделей пользователя по частоте использования.
-    Считает по AIRequestLog (только success). Сопоставляет title из логов с key из registry.
+def _build_model_selector(available_models, language_id=None):
+    """Плоский список каталога (по убыванию качества) и модель по умолчанию.
 
-    Результат кешируется per-user на 120 c (ключ ``ai:user_top:{user_id}:{limit}``),
-    чтобы не делать per-render scan AIRequestLog, добавленный коммитом ed4d528.
-    Топ-1 пользователя меняется редко; устаревание на 2 минуты незаметно, а перебор
-    логов на каждом рендере стартовой страницы был главным регрессором скорости.
-    На cache miss перебираются только последние 200 успешных запросов (вместо всей
-    истории) — для активных пользователей это убирает скан тысяч строк.
+    Порядок и дефолт считаются по статистике ВЫБРАННОГО языка: если для языка
+    есть хотя бы одна непустая метрика — по ``get_model_stats_map(...,
+    language_id=...)``; иначе по глобальному агрегату, уже приложенному к
+    элементам ``get_available_model_options()`` (``avg_seconds`` /
+    ``percent_solved``). Модели без данных уходят в конец по алфавиту.
+    ``OR_*`` равноправны и могут быть выбраны по умолчанию. Без статистики
+    вовсе — прежний фолбэк ``DEFAULT_MODEL_KEY``.
+
+    Возвращает ``(flat_models, default_model_key)``.
     """
-    try:
-        from .models import AIRequestLog
-        from .model_clients import registry
-        from .constants import AI_CACHE_KEY_PREFIX
-        from collections import Counter
-        from django.core.cache import cache
+    from .services.model_stats import get_model_stats_map, quality_scores
 
-        # Получить user_id
-        user = getattr(request, 'user', None)
-        user_id = getattr(user, 'pk', None) if user and not isinstance(user, str) else None
-        if not user_id:
-            return []
-
-        # Кеш per-user. Пустой результат тоже кешируется (пользователь без логов).
-        cache_key = f"{AI_CACHE_KEY_PREFIX}:user_top:{user_id}:{limit}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        # Построить map title → key (через публичный API реестра)
-        title_to_key = registry.title_to_key()
-
-        # Срез по epoch: если у AIAppSettings задан favorites_epoch, учитываем
-        # только успешные запросы новее этой даты. Это даёт разовый сброс счётчика
-        # фаворитов для всех (нет записей новее epoch → user_top пуст → строгий
-        # алфавит), без удаления логов; новые запросы снова набирают топ-1.
-        qs = AIRequestLog.objects.filter(status='success', user_id=user_id)
-        try:
-            epoch = AIAppSettings.get_solo().favorites_epoch
-        except Exception:
-            epoch = None
-        if epoch:
-            qs = qs.filter(sent_at__gte=epoch)
-
-        # Посчитать частоту моделей для этого пользователя по последним 200 логам.
-        # В model_names пишутся КЛЮЧИ реестра (consumers.py), так что считаем их
-        # напрямую; title_to_key — фолбэк для записей времён, когда туда попадали
-        # title'ы. Experimental-модели (EXPERIMENTAL_MODEL_PREFIXES) не поднимаем
-        # фаворитами — они всегда в самом низу селектора отдельной группой.
-        from .model_clients.registry import EXPERIMENTAL_MODEL_PREFIXES
-        c = Counter()
-        for mns in qs.order_by('-sent_at').values_list('model_names', flat=True)[:200]:
-            if mns:
-                for m in mns:
-                    key = m if registry.get(m) else title_to_key.get(m)
-                    if key and not key.startswith(EXPERIMENTAL_MODEL_PREFIXES):
-                        c[key] += 1
-
-        result = [key for key, _ in c.most_common(limit)]
-        cache.set(cache_key, result, 120)  # 2 минуты
-        return result
-    except Exception:
-        return []
-
-
-def _build_model_selector_groups(available_models, user_top_keys):
-    """Разбивает каталог на группы селектора и выбирает модель по умолчанию.
-
-    Фаворит (топ-1 не-experimental) — отдельная группа сверху. Остальные
-    non-experimental и экспериментальные OR_* сортируются по убыванию
-    качества (``quality_scores``: 0.5 скорости + 0.5 точности); модели без
-    данных — после них, по алфавиту. Без фаворита выбранной по умолчанию идёт
-    первая quality-модель; если статистики нет вовсе — прежний фолбэк
-    ``DEFAULT_MODEL_KEY``.
-
-    Возвращает ``(flat, favorite_models, other_models, experimental_models,
-    default_model_key)``.
-    """
-    from .services.model_stats import quality_scores
+    if not available_models:
+        return [], ""
 
     model_map = {item["key"]: item for item in available_models}
-    user_picks = [
-        model_map[key] for key in user_top_keys
-        if key in model_map
-        and not key.startswith(EXPERIMENTAL_MODEL_PREFIXES)
-    ]
-    favorite_models = user_picks[:1]
-    used_keys = {item["key"] for item in user_picks}
+    keys = list(model_map)
 
-    stats_map = {
-        item["key"]: {
+    ranking_stats = {
+        key: {
             "avg_seconds": item.get("avg_seconds"),
             "percent_solved": item.get("percent_solved"),
         }
-        for item in available_models
+        for key, item in model_map.items()
     }
-    scores = quality_scores(stats_map)
+    if language_id:
+        scoped = get_model_stats_map(keys, language_id=language_id)
+        scoped = {
+            key: stats for key, stats in scoped.items()
+            if stats and (
+                stats.get("avg_seconds") is not None
+                or stats.get("percent_solved") is not None
+            )
+        }
+        if scoped:
+            ranking_stats = scoped
+
+    scores = quality_scores(ranking_stats)
 
     def sort_key(item):
         score = scores.get(item["key"])
@@ -226,40 +169,17 @@ def _build_model_selector_groups(available_models, user_top_keys):
             return (1, 0.0, title, item["key"])
         return (0, -score, title, item["key"])
 
-    rest_candidates = [
-        item for item in available_models if item["key"] not in used_keys
-    ]
-    experimental_models = sorted(
-        [
-            item for item in rest_candidates
-            if item["key"].startswith(EXPERIMENTAL_MODEL_PREFIXES)
-        ],
-        key=sort_key,
-    )
-    other_models = sorted(
-        [
-            item for item in rest_candidates
-            if not item["key"].startswith(EXPERIMENTAL_MODEL_PREFIXES)
-        ],
-        key=sort_key,
-    )
-
+    flat = sorted(available_models, key=sort_key)
     default_model_key = ""
-    if not user_picks:
-        if other_models and scores.get(other_models[0]["key"]) is not None:
-            default_model_key = other_models[0]["key"]
-        elif DEFAULT_MODEL_KEY in model_map:
-            default_model_key = DEFAULT_MODEL_KEY
-            # Полное отсутствие статистики: прежний фолбэк — дефолт первым
-            # (порядок без данных и так алфавитный).
-            default_item = model_map[DEFAULT_MODEL_KEY]
-            other_models = [default_item] + [
-                item for item in other_models
-                if item["key"] != DEFAULT_MODEL_KEY
-            ]
-
-    flat = user_picks + other_models + experimental_models
-    return flat, favorite_models, other_models, experimental_models, default_model_key
+    for item in flat:
+        if scores.get(item["key"]) is not None:
+            default_model_key = item["key"]
+            break
+    if not default_model_key and DEFAULT_MODEL_KEY in model_map:
+        default_model_key = DEFAULT_MODEL_KEY
+    if not default_model_key and flat:
+        default_model_key = flat[0]["key"]
+    return flat, default_model_key
 
 
 logger = logging.getLogger(__name__)
@@ -501,11 +421,10 @@ def _render_ai_page(request, template_name, extra_context=None,
     """Рендерит страницу AI (chat/solve/find-error) с общим контекстом.
 
     Проверяет доступ, загружает список доступных моделей (с self-heal при пустом
-    списке), разбивает их на группы favorite_models/other_models/
-    experimental_models для optgroup-разделителя в шаблоне (топ-1 фаворит
-    сверху, дальше по убыванию качества; см. _build_model_selector_groups),
-    выбирает модель по умолчанию и добавляет external_session_id +
-    сохранённый из куки язык.
+    списке), строит плоский список по убыванию качества (см.
+    _build_model_selector), выбирает модель по умолчанию (по статистике
+    сохранённого языка на задачных страницах, иначе глобально) и добавляет
+    external_session_id + сохранённый из куки язык.
 
     wizard_scope — scope онбординг-wizard для этой страницы (ai/services/
     onboarding.py); с ним в контекст попадает конфиг тур-подсказок
@@ -541,20 +460,21 @@ def _render_ai_page(request, template_name, extra_context=None,
             trigger_model_health_refresh_async()
         except Exception:
             logger.exception("Failed to trigger model health self-heal refresh")
+    saved_state = _read_ai_state(request)
+    # Дефолт по статистике языка имеет смысл только на страницах с селектором
+    # языка; чат и «Мои AI-модели» выбирают лучшую по глобальному агрегату.
+    language_id = None
+    if active_page in ("solve", "find_error"):
+        try:
+            language_id = int(saved_state.get("progLng") or 0) or None
+        except (TypeError, ValueError):
+            language_id = None
     if available_models:
-        # Фаворит — отдельной группой сверху; «Все модели» и OR_* — по
-        # убыванию качества; без статистики — в конце по алфавиту.
-        user_top = _get_user_top_model_keys(request, limit=1)
-        (available_models, favorite_models, other_models,
-         experimental_models, default_model_key) = _build_model_selector_groups(
-            available_models, user_top,
+        available_models, default_model_key = _build_model_selector(
+            available_models, language_id,
         )
     else:
-        favorite_models = []
-        other_models = []
-        experimental_models = []
         default_model_key = ""
-    saved_state = _read_ai_state(request)
     external_session_id = request.session.get('external_session_id')
     # Личные модели: три optgroup внизу селектора — свои («Мои модели»),
     # адресно выданные («Доступные мне») и публичные. Приватные чужие модели
@@ -570,9 +490,6 @@ def _render_ai_page(request, template_name, extra_context=None,
     # первому рендеру и строкам, которые JS-апплаеры не трогают.
     context = {
         'available_models': available_models,
-        'favorite_models': favorite_models,
-        'other_models': other_models,
-        'experimental_models': experimental_models,
         'user_models_options': user_models_options,
         'shared_user_models': shared_user_models,
         'public_user_models': public_user_models,

@@ -6,7 +6,7 @@
     >>> response = await handler("hello", user_id=42)
 """
 
-from .registry import registry
+from .registry import provider_module, registry
 
 __all__ = ["registry", "is_output_truncated", "get_no_think_handler", "supports_think"]
 
@@ -15,12 +15,6 @@ __all__ = ["registry", "is_output_truncated", "get_no_think_handler", "supports_
 # (у SambaNova ключи без префикса — префиксный матчинг ненадёжен), с запасным
 # матчингом по префиксам ключей для неактуальных/чужих реестров.
 _PROVIDER_PREFIXES = {"ollama": ("Ollama_",), "sambanova": ()}
-
-
-def _provider_module(handler) -> str:
-    """Хвост __module__ handler'а ('ai.model_clients.ollama' → 'ollama')."""
-    module = getattr(handler, "__module__", "") or ""
-    return module.rsplit(".", 1)[-1]
 
 
 def _output_ceiling(model_key: str) -> int:
@@ -37,7 +31,7 @@ def _output_ceiling(model_key: str) -> int:
     info = registry.get(key)
     handler = info.get("handler") if info else None
     if handler is not None:
-        provider = _provider_module(handler)
+        provider = provider_module(handler)
     else:
         for cand, prefixes in _PROVIDER_PREFIXES.items():
             if key.startswith(prefixes):
@@ -94,7 +88,7 @@ def supports_think(handler) -> bool:
     его keyword-аргументом), прочим провайдерам поле недоступно по API. Хвост
     ``__module__`` — как в _output_ceiling / get_no_think_handler.
     """
-    return _provider_module(handler) == "ollama"
+    return provider_module(handler) == "ollama"
 
 
 def get_no_think_handler(handler):
@@ -111,7 +105,7 @@ def get_no_think_handler(handler):
     Провайдер определяется по хвосту ``__module__`` хендлера — как в
     _output_ceiling.
     """
-    if _provider_module(handler) == "ollama":
+    if provider_module(handler) == "ollama":
         from . import ollama as _ollama
         return _ollama.nothink_handler(handler)
     return None

@@ -80,6 +80,22 @@
   color: var(--body-quiet-color);
   text-decoration: line-through;
 }
+/* Тариф модели — только на этой админской странице. */
+.billing {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.billing-free {
+  background: rgba(18, 183, 106, 0.16);
+  color: #067647;
+}
+.billing-paid {
+  background: rgba(124, 58, 237, 0.14);
+  color: #6d28d9;
+}
 .quiet {
   color: var(--body-quiet-color);
   font-size: 12px;

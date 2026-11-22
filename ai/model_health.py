@@ -818,6 +818,10 @@ def get_all_model_options():
     ]
 
 
+#: Подписи тарифа для «Состояния моделей».
+_BILLING_LABELS = {"free": "Бесплатная", "paid": "Платная"}
+
+
 def get_model_status_rows():
     ordered = get_all_model_options()
     ordered_keys = [item["key"] for item in ordered]
@@ -859,6 +863,7 @@ def get_model_status_rows():
         row = current_rows.get(key) or latest_rows.get(key)
         is_active = bool(row and row.is_available)
         last_http_code = row.last_http_code if row else None
+        billing = registry.billing(key)
 
         result.append(
             {
@@ -873,6 +878,10 @@ def get_model_status_rows():
                 "is_current_window": bool(row and row.window_date == current_window),
                 "last_http_code": last_http_code,
                 "last_http_code_label": get_http_code_label(last_http_code),
+                # Тариф — ТОЛЬКО для админской страницы «Состояние моделей»;
+                # в пользовательский селектор и ARM-опции не попадает.
+                "billing": billing,
+                "billing_label": _BILLING_LABELS.get(billing, ""),
             }
         )
 
@@ -900,7 +909,7 @@ def get_available_model_options():
     if cached is not None:
         return cached
 
-    # Скрытые из селекторов модели (пока — OpenRouter) исключаются здесь
+    # Скрытые из селекторов модели (сейчас таких нет) исключаются здесь
     # централизованно: «Состояние моделей» и 04:00 health-check продолжают их
     # видеть/проверять (см. HIDDEN_FROM_SELECTORS_PREFIXES ниже).
     ordered_keys = [k for k in MODEL_CATALOG_KEYS if not is_hidden_from_selectors(k)]
@@ -956,30 +965,29 @@ def get_available_model_options():
     return result
 
 
-# Префиксы ключей моделей, допущенных к /arm/solve/: только Web-бот-пулы и Ollama
-# (нет жёсткого лимита вывода — длинный код не обрежется). OpenRouter/Groq
-# исключены: не вытягивают по токенам пакетную генерацию кода.
-ARM_SOLVE_MODEL_PREFIXES = ("Web_", "Ollama_")
+# Префиксы ключей моделей, допущенных к /arm/solve/: Web-бот-пулы, Ollama и
+# OpenRouter (OR_* — чтобы собирать статистику и по бесплатным моделям). У OR
+# жёсткий max_tokens (8000) — длинный код может обрезаться, это осознанно:
+# неудачи попадут в статистику моделей. Groq исключён (дневные лимиты).
+ARM_SOLVE_MODEL_PREFIXES = ("Web_", "Ollama_", "OR_")
 
 # Модели, скрытые из селекторов вовсе (каталог/health-check/«Состояние моделей»
-# остаются): на 2026-10 пусто. OpenRouter ниже НЕ здесь, а в views.py — там он
-# выводится в чате отдельной «экспериментальной» группой в самом низу селектора
-# (и исключён из /arm/solve/ через ARM_SOLVE_MODEL_PREFIXES).
+# остаются): на 2026-11 пусто.
 HIDDEN_FROM_SELECTORS_PREFIXES = ()
 
 
 def is_hidden_from_selectors(key):
-    """Скрыта ли модель из селекторов чата/ARM (пока OpenRouter OR_*)."""
+    """Скрыта ли модель из селекторов чата/ARM (сейчас — ни одна)."""
     return bool(key) and key.startswith(HIDDEN_FROM_SELECTORS_PREFIXES)
 
 
 def is_arm_solve_model(key):
-    """Допущена ли модель к /arm/solve/ (Web_* и Ollama_*)."""
+    """Допущена ли модель к /arm/solve/ (Web_*, Ollama_*, OR_*)."""
     return bool(key) and key.startswith(ARM_SOLVE_MODEL_PREFIXES)
 
 
 def get_arm_solve_model_options():
-    """Все модели каталога, допущенные к /arm/solve/ (Web_* и Ollama_*).
+    """Все модели каталога, допущенные к /arm/solve/ (Web_*, Ollama_*, OR_*).
 
     Список больше НЕ режется по «is_available» последнего health-окна: новая
     модель каталога иначе не видна до первой проверки (окно раз в сутки,
