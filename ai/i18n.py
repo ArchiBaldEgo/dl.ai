@@ -304,7 +304,6 @@ _USER_MODELS_STRINGS = {
         "colUrl": "Адрес",
         "colKey": "Ключ",
         "colState": "Состояние",
-        "fieldTitle": "Название *",
         "fieldProvider": "Провайдер",
         "fieldModelId": "ID модели у провайдера *",
         "fieldBaseUrl": "Базовый URL (для совместимых провайдеров)",
@@ -324,7 +323,6 @@ _USER_MODELS_STRINGS = {
         "stateOff": "выключена",
         "hintBaseUrl": "Только https, публичный адрес (не localhost и не внутренняя сеть).",
         "hintApiKey": "Хранится зашифрованным. Чтобы сменить ключ — введите новый.",
-        "placeholderTitle": "Например: Моя Qwen3 через OpenRouter",
         "placeholderModelId": "например qwen/qwen3-235b-a22b",
         "placeholderBaseUrl": "https://api.example.com/v1",
         "placeholderApiKey": "оставьте пустым, чтобы не менять",
@@ -355,15 +353,18 @@ _USER_MODELS_STRINGS = {
         "allModelsTitle": "Все модели",
         "allModelsIntro": (
             "Таблица видна только суперпользователю. Видны провайдер и ID "
-            "модели, можно менять список адресного доступа и одобрять "
-            "заявки на публикацию; адреса, ключи и настройки чужих моделей "
-            "не показываются."
+            "модели, можно менять список адресного доступа, одобрять "
+            "заявки на публикацию и переименовывать модель (по умолчанию "
+            "название совпадает с ID модели). Адреса, ключи и настройки "
+            "чужих моделей не показываются."
         ),
         "colOwner": "Владелец",
         "colManage": "Управление",
         "accessPanelTitle": "Доступ к модели",
         "btnSaveAccess": "Сохранить доступ",
         "btnAccess": "Настроить доступ",
+        "btnRename": "Переименовать",
+        "promptRename": "Название модели (видно в селекторе):",
         "btnApprove": "Одобрить",
         "btnReject": "Отклонить",
         "btnRevoke": "Снять с публикации",
@@ -393,7 +394,6 @@ _USER_MODELS_STRINGS = {
         "colUrl": "Address",
         "colKey": "Key",
         "colState": "State",
-        "fieldTitle": "Name *",
         "fieldProvider": "Provider",
         "fieldModelId": "Model ID at the provider *",
         "fieldBaseUrl": "Base URL (for compatible providers)",
@@ -413,7 +413,6 @@ _USER_MODELS_STRINGS = {
         "stateOff": "disabled",
         "hintBaseUrl": "HTTPS only, public address (not localhost and not the internal network).",
         "hintApiKey": "Stored encrypted. Enter a new key to change it.",
-        "placeholderTitle": "For example: My Qwen3 via OpenRouter",
         "placeholderModelId": "for example qwen/qwen3-235b-a22b",
         "placeholderBaseUrl": "https://api.example.com/v1",
         "placeholderApiKey": "leave empty to keep the current key",
@@ -444,15 +443,18 @@ _USER_MODELS_STRINGS = {
         "allModelsTitle": "All models",
         "allModelsIntro": (
             "This table is visible to superusers only. Provider and model ID "
-            "are shown; you can change the direct-access list and approve "
-            "publication requests. URLs, keys and settings of other users' "
-            "models are not shown."
+            "are shown; you can change the direct-access list, approve "
+            "publication requests and rename a model (the name defaults to "
+            "the model ID). URLs, keys and settings of other users' models "
+            "are not shown."
         ),
         "colOwner": "Owner",
         "colManage": "Manage",
         "accessPanelTitle": "Model access",
         "btnSaveAccess": "Save access",
         "btnAccess": "Manage access",
+        "btnRename": "Rename",
+        "promptRename": "Model name (shown in the selector):",
         "btnApprove": "Approve",
         "btnReject": "Reject",
         "btnRevoke": "Unpublish",
@@ -483,7 +485,6 @@ _USER_MODELS_STRINGS = {
         "colUrl": "Adresse",
         "colKey": "Clé",
         "colState": "État",
-        "fieldTitle": "Nom *",
         "fieldProvider": "Fournisseur",
         "fieldModelId": "ID du modèle chez le fournisseur *",
         "fieldBaseUrl": "URL de base (pour les fournisseurs compatibles)",
@@ -503,7 +504,6 @@ _USER_MODELS_STRINGS = {
         "stateOff": "désactivé",
         "hintBaseUrl": "HTTPS uniquement, adresse publique (ni localhost ni le réseau interne).",
         "hintApiKey": "Stockée chiffrée. Saisissez une nouvelle clé pour la changer.",
-        "placeholderTitle": "Par exemple : Mon Qwen3 via OpenRouter",
         "placeholderModelId": "par exemple qwen/qwen3-235b-a22b",
         "placeholderBaseUrl": "https://api.example.com/v1",
         "placeholderApiKey": "laissez vide pour ne pas changer la clé",
@@ -536,15 +536,18 @@ _USER_MODELS_STRINGS = {
         "allModelsIntro": (
             "Ce tableau n'est visible que par le superutilisateur. Le "
             "fournisseur et l'ID du modèle sont affichés ; vous pouvez "
-            "modifier la liste d'accès direct et approuver les demandes de "
-            "publication. Les adresses, clés et réglages des modèles d'autres "
-            "utilisateurs ne sont pas affichés."
+            "modifier la liste d'accès direct, approuver les demandes de "
+            "publication et renommer un modèle (le nom reprend par défaut "
+            "l'ID du modèle). Les adresses, clés et réglages des modèles "
+            "d'autres utilisateurs ne sont pas affichés."
         ),
         "colOwner": "Propriétaire",
         "colManage": "Gestion",
         "accessPanelTitle": "Accès au modèle",
         "btnSaveAccess": "Enregistrer l'accès",
         "btnAccess": "Gérer l'accès",
+        "btnRename": "Renommer",
+        "promptRename": "Nom du modèle (affiché dans le sélecteur) :",
         "btnApprove": "Approuver",
         "btnReject": "Refuser",
         "btnRevoke": "Retirer la publication",

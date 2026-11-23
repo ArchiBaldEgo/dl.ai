@@ -12,10 +12,10 @@
 {% endblock %}
 
 {% block content %}
-  {% include "ai/_user_models_panel.html" with create_url="/ai/admin/user-models/create/" delete_url="/ai/admin/user-models/delete/" access_url="/ai/admin/user-models/access/" search_url="/ai/admin/user-models/search-users/" %}
+  {% include "ai/_user_models_panel.html" with create_url="/ai/admin/user-models/create/" delete_url="/ai/admin/user-models/delete/" access_url="/ai/admin/user-models/access/" search_url="/ai/admin/user-models/search-users/" title_url="/ai/admin/user-models/title/" %}
 {% endblock %}
 
 {% block extrahead %}
   {{ block.super }}
-  <script src="{% static 'admin/ai/user_models/index.js' %}?v=3" defer></script>
+  <script src="{% static 'admin/ai/user_models/index.js' %}?v=4" defer></script>
 {% endblock %}

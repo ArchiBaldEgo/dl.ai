@@ -7,7 +7,8 @@
      data-create-url="{{ create_url }}"
      data-delete-url="{{ delete_url }}"
      data-access-url="{{ access_url }}"
-     data-search-url="{{ search_url }}">
+     data-search-url="{{ search_url }}"
+     {% if title_url %}data-title-url="{{ title_url }}"{% endif %}>
   {# Данные для JS (правка строки, дефолтный base_url провайдера) — через #}
   {# json_script, а не инлайн-подстановка в <script> (CLAUDE.md).            #}
   {{ provider_base_urls|json_script:"ai-um-provider-urls" }}
@@ -23,10 +24,9 @@
     {% csrf_token %}
     <input type="hidden" name="id" value="">
     <h3 id="ai-um-form-title">{{ t.newModel }}</h3>
+    {# Названия в форме нет: подпись модели = ID модели (правит только       #}
+    {# модератор в таблице «Все модели»).                                    #}
     <div class="ai-um-row">
-      <label>{{ t.fieldTitle }}
-        <input type="text" name="title" maxlength="255" placeholder="{{ t.placeholderTitle }}" required>
-      </label>
       <label>{{ t.fieldProvider }}
         <select name="provider" id="ai-um-provider">
           {% for value, label in provider_choices %}
@@ -113,8 +113,9 @@
   </table>
 
   {% if all_models %}
-    {# Таблица «Все модели» — ТОЛЬКО суперюзеру. Управление ограничено  #}
-    {# доступом: адреса, ключи и настройки чужих моделей не показываются. #}
+    {# Таблица «Все модели» — ТОЛЬКО суперюзеру. Управление: доступ,      #}
+    {# модерация заявок и название модели; адреса, ключи и настройки      #}
+    {# чужих моделей не показываются.                                      #}
     <h3 class="ai-um-all-title">{{ t.allModelsTitle }}</h3>
     <p class="ai-um-intro" id="ai-um-all-intro">{{ t.allModelsIntro }}</p>
     <table class="ai-um-table ai-um-all-models" id="ai-um-all-models">
@@ -140,6 +141,9 @@
             <td class="ai-um-state" data-active="{% if model.is_active %}1{% else %}0{% endif %}">{% if model.is_active %}{{ t.stateOn }}{% else %}{{ t.stateOff }}{% endif %}</td>
             <td class="ai-um-actions-cell">
               <button type="button" class="button ai-um-access-edit" data-id="{{ model.id }}">{{ t.btnAccess }}</button>
+              {% if title_url %}
+                <button type="button" class="button ai-um-rename" data-id="{{ model.id }}">{{ t.btnRename }}</button>
+              {% endif %}
               {% if model.public_requested %}
                 <button type="button" class="button ai-um-moderate" data-id="{{ model.id }}" data-decision="approve">{{ t.btnApprove }}</button>
                 <button type="button" class="button ai-um-moderate" data-id="{{ model.id }}" data-decision="reject">{{ t.btnReject }}</button>

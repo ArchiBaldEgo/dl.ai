@@ -550,7 +550,8 @@ def find_user_model(user, model_key: str):
 # (/ai/my-models/ — для обычного пользователя), поэтому вьюхи должны
 # звать общий сервис, а не дублировать правила (DRY, CLAUDE.md).
 
-#: Максимальная длина названия модели (подпись в селекторе).
+#: Максимальная длина названия модели (подпись в селекторе; правит только
+#: модератор — пользователь название не вводит, оно равно ID модели).
 MAX_TITLE_LEN = 255
 
 #: Потолок генерации по умолчанию и границы (защита от абсурдных значений).
@@ -694,10 +695,15 @@ def save_user_model(user, payload: dict) -> tuple:
     Возвращает ``(ok, message, model_pk)``. Валидация — здесь же: чужую
     запись по ``id`` не обновить (её для этого пользователя не существует).
 
-    ``payload`` — словарь с полями: id, title, provider, model_id,
-    base_url, api_key, max_tokens, supports_vision, supports_think,
-    is_active, public_request, shared_with (список id получателей). Поля
-    доступа необязательны: если их НЕ передали, текущий доступ не трогаем.
+    ``payload`` — словарь с полями: id, provider, model_id, base_url,
+    api_key, max_tokens, supports_vision, supports_think, is_active,
+    public_request, shared_with (список id получателей). Поля доступа
+    необязательны: если их НЕ передали, текущий доступ не трогаем.
+
+    Название (``title``) пользователь НЕ вводит: подпись в селекторе равна
+    ID модели. Переименовать модель может только модератор
+    (см. ``set_user_model_title``), и его название правка конфигурации
+    владельцем не затирает.
 
     Публичность этим путём НЕ включается: ``public_request=True`` создаёт
     заявку на модерацию. Старое поле ``is_public`` трактуем как заявку
@@ -709,10 +715,6 @@ def save_user_model(user, payload: dict) -> tuple:
     if not user or not getattr(user, "is_authenticated", False):
         return False, "Access denied", None
     payload = payload or {}
-
-    title = clean_user_text(payload.get("title"), MAX_TITLE_LEN)
-    if not title:
-        return False, "Название модели обязательно", None
 
     provider = clean_user_text(payload.get("provider"), 32) or AIUserModel.PROVIDER_OPENAI
     if provider not in dict(AIUserModel.PROVIDER_CHOICES):
@@ -783,7 +785,12 @@ def save_user_model(user, payload: dict) -> tuple:
             instance.api_key_encrypted,
         )
 
-    instance.title = title
+    # Автоназвание: пока название совпадает с ID модели, оно считается
+    # системным и следует за новой моделью. Отличается — значит его задал
+    # модератор (set_user_model_title), и владелец его не перезаписывает.
+    if not instance.pk or not instance.title or instance.title == instance.model_id:
+        instance.title = model_id
+
     instance.provider = provider
     instance.model_id = model_id
     instance.base_url = base_url
@@ -903,6 +910,40 @@ def set_user_model_access(
         instance.save()
     if share_users is not None:
         instance.shared_with.set(share_users)
+    return True, ""
+
+
+def set_user_model_title(actor, model_pk, title) -> tuple:
+    """Переименовать личную модель — ТОЛЬКО модератор (реальный суперюзер).
+
+    Пользователь название не вводит: оно автоматически равно ID модели.
+    Суперпользователь правит подпись при модерации (например, когда ID
+    технический). Конфигурация и ключи модели этой операцией не меняются.
+    Возвращает ``(ok, message)``.
+    """
+    from ..models import AIUserModel
+
+    if not actor or not getattr(actor, "is_authenticated", False):
+        return False, "Access denied"
+
+    # Ленивый импорт: сервисы не должны тянуть admin на загрузке модуля.
+    from ..admin.permissions import is_superuser_user
+
+    if not is_superuser_user(actor):
+        return False, "Access denied"
+    try:
+        model_pk = int(model_pk or 0)
+    except (TypeError, ValueError):
+        return False, "Некорректный идентификатор"
+    clean_title = clean_user_text(title, MAX_TITLE_LEN)
+    if not clean_title:
+        return False, "Название модели обязательно"
+    instance = AIUserModel.objects.filter(pk=model_pk).first()
+    if instance is None:
+        return False, "Модель не найдена"
+    instance.title = clean_title
+    # updated_at (auto_now) пишется только если явно в update_fields.
+    instance.save(update_fields=["title", "updated_at"])
     return True, ""
 
 

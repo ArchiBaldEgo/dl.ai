@@ -14,9 +14,11 @@
 * правка/удаление — только своей записи (владелец проверяется по pk);
 * владелец может открыть модель адресно (``shared_with``) или всем
   (``is_public``) — но только на пользовательских страницах, не в ARM;
-* суперюзер видит таблицу «Все модели» и меняет ТОЛЬКО доступ
-  (публичность/список получателей) — чужие URL/ключи/настройки не читает
-  и не меняет (ai/services/user_models.py::set_user_model_access).
+* суперюзер видит таблицу «Все модели», меняет доступ
+  (публичность/список получателей — ai/services/user_models.py::
+  set_user_model_access) и может переименовать модель при модерации
+  (``set_user_model_title``); чужие URL/ключи/настройки не читает и не
+  меняет. Пользователь название НЕ вводит: оно равно ID модели.
 
 Безопасность ввода (владелец отдельно потребовал «защиту от атак»):
 * ``base_url`` — только https, без приватных/локальных/линковых адресов,
@@ -46,6 +48,7 @@ from ..services.user_models import (
     save_user_model,
     delete_user_model,
     set_user_model_access,
+    set_user_model_title,
     user_model_rows,
 )
 from .permissions import can_access_user_models, is_superuser_user
@@ -89,8 +92,9 @@ def admin_user_models_view(request):
 def admin_user_model_create_view(request):
     """Создать личную модель (или обновить существующую — pk в теле).
 
-    Тело — JSON: ``{id?, title, provider, model_id, base_url, api_key,
-    max_tokens, supports_vision, supports_think, is_active}``.
+    Тело — JSON: ``{id?, provider, model_id, base_url, api_key,
+    max_tokens, supports_vision, supports_think, is_active}``. Название
+    не передаётся: оно равно ID модели (правит только модератор).
 
     Владелец: ``id`` принадлежит текущему пользователю — чужую запись
     обновить нельзя (иначе «не найдена» — записи для него не существует).
@@ -149,6 +153,30 @@ def admin_user_model_access_view(request):
     ok, message = set_user_model_access(
         request.user, payload.get("id"), payload.get("is_public"),
         payload.get("shared_with"), public_request=payload.get("public_request"),
+    )
+    if not ok:
+        status = 404 if message == "Модель не найдена" else 400
+        return _forbid(message, status=status)
+    return JsonResponse({"ok": True})
+
+
+@require_POST
+def admin_user_model_title_view(request):
+    """Переименовать модель при модерации: только реальный суперюзер.
+
+    Тело — ``{id, title}``. Пользователь название не вводит (оно равно
+    ID модели), поэтому правка подписи — исключительно модераторская.
+    """
+    if not request.user.is_authenticated or not is_superuser_user(request.user):
+        return _forbid()
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return _forbid("Некорректный запрос", status=400)
+    if not isinstance(payload, dict):
+        return _forbid("Некорректный запрос", status=400)
+    ok, message = set_user_model_title(
+        request.user, payload.get("id"), payload.get("title"),
     )
     if not ok:
         status = 404 if message == "Модель не найдена" else 400

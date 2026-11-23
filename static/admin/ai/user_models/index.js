@@ -5,9 +5,11 @@
 //
 // Доступ: чекбокс «Запросить доступ для всех» (по умолчанию ВЫКЛ +
 // предупреждение; публикацию одобряет суперюзер) и адресная выдача — поиск
-// по DL-id/ФИО, несколько получателей, чипы с ×. Суперюзерская таблица
-// «Все модели» управляет адресным доступом и модерацией заявок: адреса,
-// ключи и настройки чужих моделей на страницу не попадают.
+// по DL-id/ФИО, несколько получателей, чипы с ×. Название модели не
+// вводится — оно равно ID модели; переименовать может только модератор.
+// Суперюзерская таблица «Все модели» управляет адресным доступом,
+// модерацией заявок и переименованием: адреса, ключи и настройки чужих
+// моделей на страницу не попадают.
 //
 // Тексты — из json_script «ai-um-i18n» (все три языка): подписи
 // перерисовываются при смене языка (#selectLang) на клиентской странице и
@@ -279,6 +281,7 @@
         var deleteUrl = wrap.getAttribute('data-delete-url') || '';
         var accessUrl = wrap.getAttribute('data-access-url') || '';
         var searchUrl = wrap.getAttribute('data-search-url') || '';
+        var titleUrl = wrap.getAttribute('data-title-url') || '';
         var providerUrls = readJson('ai-um-provider-urls');
         var rows = readJson('ai-um-rows');
         var allRows = readJson('ai-um-all-rows');
@@ -429,6 +432,10 @@
             for (var ab = 0; ab < accessBtns.length; ab++) {
                 accessBtns[ab].textContent = tr('btnAccess', 'Настроить доступ');
             }
+            var renameBtns = document.querySelectorAll('.ai-um-rename');
+            for (var rn = 0; rn < renameBtns.length; rn++) {
+                renameBtns[rn].textContent = tr('btnRename', 'Переименовать');
+            }
             var approveBtns = document.querySelectorAll('.ai-um-moderate[data-decision="approve"]');
             for (var ap = 0; ap < approveBtns.length; ap++) {
                 approveBtns[ap].textContent = tr('btnApprove', 'Одобрить');
@@ -516,7 +523,6 @@
             setMessage(tr('msgSaving', 'Сохраняем…'), '');
             var payload = {
                 id: form.id.value || null,
-                title: form.title.value,
                 provider: form.provider.value,
                 model_id: form.model_id.value,
                 base_url: form.base_url.value,
@@ -551,7 +557,6 @@
                 var row = rowsById[String(target.getAttribute('data-id'))];
                 if (!row) return;
                 form.id.value = row.id;
-                form.title.value = row.title || '';
                 form.provider.value = row.provider || 'openai';
                 form.model_id.value = row.model_id || '';
                 form.base_url.value = row.base_url || '';
@@ -581,6 +586,30 @@
                     })
                     .catch(function (err) {
                         setMessage(err.message || tr('errDelete', 'Ошибка удаления'), 'err');
+                    });
+                return;
+            }
+
+            if (target.classList.contains('ai-um-rename')) {
+                var renameId = target.getAttribute('data-id');
+                var renameModel = allRowsById[String(renameId)];
+                if (!renameModel || !titleUrl) return;
+                var entered = window.prompt(
+                    tr('promptRename', 'Название модели (видно в селекторе):'),
+                    renameModel.title || ''
+                );
+                if (entered === null) return;
+                entered = entered.trim();
+                if (!entered || entered === (renameModel.title || '')) return;
+                // Сообщение — в форме (бокс таблицы доступа скрыт, пока не
+                // открыт редактор доступа, и переименование было бы «немым»).
+                setMessage(tr('msgSaving', 'Сохраняем…'), '');
+                post(titleUrl, { id: Number(renameId), title: entered })
+                    .then(function () {
+                        window.location.reload();
+                    })
+                    .catch(function (err) {
+                        setMessage(err.message || tr('errSave', 'Ошибка сохранения'), 'err');
                     });
                 return;
             }

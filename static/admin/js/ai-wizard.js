@@ -134,7 +134,7 @@
                 "#myModelsTopBtn": { title: "You are here", text: "This is the “My AI models” page. Here you connect your own models with your own key." },
                 "#userDocsBtn": { title: "The “?” button", text: "The full user guide. You can also show these tips again there." },
                 ".ai-um-intro": { title: "Why do this", text: "Your own model is useful if you have a provider key (OpenAI-compatible, Anthropic, Ollama, etc.). The model is visible only to you until you grant access yourself." },
-                "#ai-um-form": { title: "Model form", text: "Title — how the model is named in the list. Provider — where it comes from. Model ID — its exact name at the provider." },
+                "#ai-um-form": { title: "Model form", text: "Provider — where it comes from. Model ID — its exact name at the provider; the name in the list is filled in from it automatically." },
                 "#ai-um-provider": { title: "Provider", text: "Choose where the model is registered. The API address will be filled in automatically; you can adjust it in the “Base URL” field if needed." },
                 '#ai-um-form input[name="model_id"]': { title: "Model ID", text: "The exact model name at the provider — for example, gpt-4o-mini or llama3. If it is wrong, the model will not answer." },
                 '#ai-um-form input[name="api_key"]': { title: "API key", text: "Your secret key from the provider. It is stored encrypted and never shown. When editing a model, leave the field empty to keep the key." },
@@ -182,7 +182,7 @@
                 "#myModelsTopBtn": { title: "Tu es ici", text: "C’est la page « Mes modèles d’IA ». Ici, tu connectes tes propres modèles avec ta propre clé." },
                 "#userDocsBtn": { title: "Le bouton « ? »", text: "Le guide utilisateur complet. Tu peux aussi y réafficher ces astuces." },
                 ".ai-um-intro": { title: "À quoi ça sert", text: "Ton propre modèle est utile si tu as une clé de fournisseur (compatible OpenAI, Anthropic, Ollama, etc.). Le modèle n’est visible que par toi jusqu’à ce que tu donnes l’accès toi-même." },
-                "#ai-um-form": { title: "Formulaire du modèle", text: "Titre — le nom du modèle dans la liste. Fournisseur — d’où il vient. ID du modèle — son nom exact chez le fournisseur." },
+                "#ai-um-form": { title: "Formulaire du modèle", text: "Fournisseur — d’où il vient. ID du modèle — son nom exact chez le fournisseur ; le nom dans la liste en est repris automatiquement." },
                 "#ai-um-provider": { title: "Fournisseur", text: "Choisis où le modèle est enregistré. L’adresse de l’API se remplit toute seule ; tu peux la corriger dans le champ « Adresse de base »." },
                 '#ai-um-form input[name="model_id"]': { title: "ID du modèle", text: "Le nom exact du modèle chez le fournisseur — par exemple gpt-4o-mini ou llama3. S’il est faux, le modèle ne répondra pas." },
                 '#ai-um-form input[name="api_key"]': { title: "Clé API", text: "Ta clé secrète du fournisseur. Elle est stockée chiffrée et jamais affichée. Lors d’une modification, laisse le champ vide pour garder la clé." },
@@ -352,7 +352,7 @@
             { sel: "#myModelsTopBtn", rank: 13, title: "Ты здесь", text: "Это страница «Мои AI-модели». Здесь подключаются твои собственные модели с твоим ключом.", pos: "bottom" },
             { sel: "#userDocsBtn", rank: 14, title: "Кнопка «?»", text: "Полная инструкция пользователя. Там же можно снова показать эти подсказки.", pos: "bottom" },
             { sel: ".ai-um-intro", rank: 20, title: "Зачем это", text: "Своя модель нужна, если у тебя есть ключ провайдера (OpenAI-совместимого, Anthropic, Ollama и т. п.). Модель появится только у тебя — другие её не увидят, пока ты сам не откроешь доступ.", pos: "bottom" },
-            { sel: "#ai-um-form", rank: 21, title: "Форма модели", text: "Название — как модель называть в списке. Провайдер — откуда она. ID модели — её точное имя у провайдера.", pos: "bottom" },
+            { sel: "#ai-um-form", rank: 21, title: "Форма модели", text: "Провайдер — откуда модель. ID модели — её точное имя у провайдера; название в списке подставится из него автоматически.", pos: "bottom" },
             { sel: "#ai-um-provider", rank: 22, title: "Провайдер", text: "Выбери, где зарегистрирована модель. От этого зависит адрес API, который подставится сам; при необходимости его можно поправить в поле «Базовый адрес».", pos: "bottom" },
             { sel: '#ai-um-form input[name="model_id"]', rank: 23, title: "ID модели", text: "Точное имя модели у провайдера — например, gpt-4o-mini или llama3. Если ошибиться, модель не ответит.", pos: "bottom" },
             { sel: '#ai-um-form input[name="api_key"]', rank: 24, title: "Ключ API", text: "Твой секретный ключ от провайдера. Он хранится зашифрованным и никому не показывается. При правке модели оставь поле пустым, чтобы не менять ключ.", pos: "bottom" },
@@ -504,7 +504,7 @@
 
         // Мои AI-модели: личная модель пользователя (провайдер + модель + ключ).
         admin_user_models: [
-            { sel: ".ai-um-form", title: "Форма модели", text: "Название, провайдер, ID модели у провайдера, базовый адрес (для совместимых) и ключ. Модель должна работать без VPN — адрес провайдера должен быть доступен из сети университета.", pos: "bottom" },
+            { sel: ".ai-um-form", title: "Форма модели", text: "Провайдер, ID модели у провайдера, базовый адрес (для совместимых) и ключ; название в списке подставляется из ID модели. Модель должна работать без VPN — адрес провайдера должен быть доступен из сети университета.", pos: "bottom" },
             { sel: ".ai-um-form input[name=api_key]", title: "Ключ API", text: "Ключ хранится зашифрованным и в открытом виде нигде не показывается. Оставь поле пустым, чтобы не менять ключ.", pos: "bottom" },
             { sel: ".ai-um-table", title: "Список", text: "Твои модели. «Править» — изменить, «Удалить» — убрать. Другие пользователи их не видят.", pos: "top" }
         ],

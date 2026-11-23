@@ -22391,6 +22391,8 @@ class UserModelSharingCrudTests(TestCase):
         ok, message, _ = save_user_model(self.owner, self._payload(title="Новое имя"))
         self.assertTrue(ok, message)
         self.model.refresh_from_db()
+        # Название пользователь не задаёт: присланный title игнорируется.
+        self.assertEqual(self.model.title, "Моя")
         self.assertTrue(self.model.is_public)
         self.assertEqual(
             list(self.model.shared_with.values_list("pk", flat=True)),
@@ -22437,6 +22439,94 @@ class UserModelSharingCrudTests(TestCase):
         self.assertEqual(foreign.title, "Чужая")
         self.assertFalse(foreign.is_public)
         self.assertEqual(foreign.shared_with.count(), 0)
+
+
+class UserModelAutoTitleTests(_AdminViewRequestMixin, TestCase):
+    """Название не вводится пользователем: оно = ID модели; правит модератор."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        self.factory = RequestFactory()
+        user_model = get_user_model()
+        self.owner = user_model.objects.create_user(username="auto-owner", password="x")
+        self.other = user_model.objects.create_user(username="auto-other", password="x")
+        self.superuser = user_model.objects.create_superuser(
+            username="auto-su", password="x", email="auto-su@t.com",
+        )
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="m1", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m1", base_url="https://api.openai.com/v1",
+        )
+
+    def _payload(self, **overrides):
+        payload = {
+            "id": self.model.pk, "provider": "openai", "model_id": "m1",
+            "base_url": "https://api.openai.com/v1", "max_tokens": 8000,
+            "is_active": True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_new_model_title_equals_model_id_and_ignores_payload(self):
+        from ai.services.user_models import save_user_model
+        ok, message, model_pk = save_user_model(self.owner, {
+            "title": "Моё красивое название", "provider": "openai",
+            "model_id": "qwen/qwen3-235b", "base_url": "https://api.openai.com/v1",
+        })
+        self.assertTrue(ok, message)
+        from ai.models import AIUserModel
+        created = AIUserModel.objects.get(pk=model_pk)
+        self.assertEqual(created.title, "qwen/qwen3-235b")
+
+    def test_auto_title_follows_changed_model_id(self):
+        from ai.services.user_models import save_user_model
+        ok, message, _ = save_user_model(
+            self.owner, self._payload(model_id="m2", title="Чужое имя"),
+        )
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertEqual(self.model.model_id, "m2")
+        self.assertEqual(self.model.title, "m2")
+
+    def test_moderator_renamed_title_survives_owner_edit(self):
+        from ai.services.user_models import save_user_model, set_user_model_title
+        ok, message = set_user_model_title(self.superuser, self.model.pk, "Понятное имя")
+        self.assertTrue(ok, message)
+        ok, message, _ = save_user_model(self.owner, self._payload(model_id="m3"))
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertEqual(self.model.model_id, "m3")
+        self.assertEqual(self.model.title, "Понятное имя")
+
+    def test_only_superuser_can_rename(self):
+        from ai.services.user_models import set_user_model_title
+        ok, message = set_user_model_title(self.owner, self.model.pk, "Моё")
+        self.assertFalse(ok)
+        self.assertEqual(message, "Access denied")
+        ok, message = set_user_model_title(self.superuser, self.model.pk, "  ")
+        self.assertFalse(ok)
+        self.model.refresh_from_db()
+        self.assertEqual(self.model.title, "m1")
+
+    def test_admin_rename_endpoint_is_superuser_only(self):
+        from ai.admin.user_models import admin_user_model_title_view
+
+        def _post(user, payload):
+            request = self._admin_request(
+                user, method="post", path="/ai/admin/user-models/title/",
+                data=json.dumps(payload), content_type="application/json",
+            )
+            return admin_user_model_title_view(request)
+
+        response = _post(self.owner, {"id": self.model.pk, "title": "Моё"})
+        self.assertIn(response.status_code, (403, 404))
+        self.model.refresh_from_db()
+        self.assertEqual(self.model.title, "m1")
+
+        response = _post(self.superuser, {"id": self.model.pk, "title": "Новое"})
+        self.assertEqual(response.status_code, 200)
+        self.model.refresh_from_db()
+        self.assertEqual(self.model.title, "Новое")
 
 
 class UserModelSuperuserAccessTests(_AdminViewRequestMixin, TestCase):
