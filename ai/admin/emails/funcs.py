@@ -25,7 +25,7 @@ def send_update_log_email(log: UpdateLog) -> None:
   author_email = log.author
   
   title = f"На dl.ai вышло обновление"
-  text = f"""Обновление от {author_name} ({author_email}) от {format_date(log.commit.date)}:
+  text = f"""Обновление от {author_name} ({author_email}) от {format_date(str(log.commit_date))}:
     {log.description}
   """
   
@@ -77,6 +77,9 @@ def send_tasks_notifications() -> None:
     .select_related("taken_by")
     .order_by("taken_by_id", "kind", "priority_no", "-created_at", "-id")
   )
+  
+  for task in tasks_taken:
+    print(task)
 
   # Группируем по разработчику
   for _, developer_tasks in groupby(tasks_taken, key=attrgetter("taken_by_id")):
@@ -88,16 +91,16 @@ def send_tasks_notifications() -> None:
         task_counter = 0
         for task in tasks:
           task_counter+=1
-          email_text += f"\n{task_counter}. {task.title} ({format_date(task.taken_at)}. \n\t{task.description})"
+          email_text += f"\n{task_counter}. {task.title} ({format_date(str(task.taken_at))}). \n\t{task.description}\n"
       
-        # developer_email = get_email_of_user(developer),
+        developer_email = get_email_of_user(developer),
 
         
 
         send_email_message_dl(
           [
-            TEST_EMAIL
-            # developer_email,
+            TEST_EMAIL,
+            developer_email,
             # DOLINSKY_EMAIL,
           ],
           "Напоминание о заданиях",

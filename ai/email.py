@@ -40,10 +40,6 @@ def get_email_of_user(user) -> str:
   """
   from ai.services.user_directory import display_name_for_user
   name = display_name_for_user(user)
-  return (
-    UserToEmailDictionary.objects
-    .filter(user=name)
-    .values_list("email", flat=True)
-    .first()
-    or ""
-  )
+  email = UserToEmailDictionary.objects.filter(user=name).values_list("email", flat=True).first() or ""
+  
+  return email

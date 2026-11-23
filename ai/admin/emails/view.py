@@ -79,10 +79,10 @@ def view(request: HttpRequest) -> TemplateResponse:
 # --- Functions ---
 
 def send_test_email(*, to: str, subject: str, body: str) -> None:
-  # recipients = [i.strip() for i in to.split(",")]
-  # send_email_message_dl(recipients, subject, body)
-  from ai.admin.emails.funcs import send_tasks_notifications 
-  send_tasks_notifications()
+  recipients = [i.strip() for i in to.split(",")]
+  send_email_message_dl(recipients, subject, body)
+  # from ai.admin.emails.funcs import send_tasks_notifications 
+  # send_tasks_notifications()
   
   return
 

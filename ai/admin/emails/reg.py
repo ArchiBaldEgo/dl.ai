@@ -20,6 +20,4 @@ def can_access(request: HttpRequest) -> bool:
     if not request.user.is_authenticated:
         return False
     
-    return is_superuser_user(request.user) or user_has_key(
-        request.user, "page.emails" # TODO: добавить page.emails 
-    )  
+    return is_superuser_user(request.user)
