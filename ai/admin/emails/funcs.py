@@ -1,20 +1,26 @@
 # ai/admin/emails/funcs.py
 
-from ai.models import UpdateLog
-from ai.email import send_email_message_dl, get_email_of_user
-import logging
-
 """
 Функции связанные с работой с email
 """
 
+from ai.models import UpdateLog
+from ai.email import send_email_message_dl, get_email_of_user
+import logging
+
+import os
+from ai.debug import not_debug_only
+
 logger = logging.getLogger(__name__)
 
-TEST_EMAIL = "egorbespalovwork@gmail.com"
+# Email разработчика для тестирования
+TEST_EMAIL = os.getenv("TEST_EMAIL")
 
 # Email Долинского
 DOLINSKY_EMAIL = get_email_of_user("Михаил Долинский")
 
+
+@not_debug_only
 def send_update_log_email(log: UpdateLog) -> None:
   from ai.services.user_directory import display_name_for_user
   # Показываем только ключевые.
@@ -33,7 +39,7 @@ def send_update_log_email(log: UpdateLog) -> None:
   send_email_message_dl(
     [
       TEST_EMAIL,
-      # DOLINSKY_EMAIL,  
+      DOLINSKY_EMAIL, 
     ],
     title,
     text
@@ -48,7 +54,7 @@ def send_update_log_email(log: UpdateLog) -> None:
 def format_date(raw_date: str) -> str:
   return raw_date[0:16]
 
-
+@not_debug_only
 def send_tasks_notifications() -> None:
   """
     Отправляет каждому разработчику и копию Долинскому сообщение.
@@ -100,8 +106,7 @@ def send_tasks_notifications() -> None:
         send_email_message_dl(
           [
             TEST_EMAIL,
-            developer_email,
-            # DOLINSKY_EMAIL,
+            developer_email
           ],
           "Напоминание о заданиях",
           email_text
@@ -109,7 +114,8 @@ def send_tasks_notifications() -> None:
         
       except Exception as e:
         logger.exception(e)
-      
+
+@not_debug_only
 def send_task_assign_notification(task, assigned_to, assigned_by) -> None:
   from ai.email import send_email_message_dl, get_email_of_user
   from ai.services.user_directory import display_name_for_user
@@ -126,8 +132,7 @@ def send_task_assign_notification(task, assigned_to, assigned_by) -> None:
   send_email_message_dl(
     [
       TEST_EMAIL,
-      # DOLINSKY_EMAIL,
-      # email,
+      email,
     ],
     email_subject,
     email_text

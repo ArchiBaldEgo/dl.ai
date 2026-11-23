@@ -1,8 +1,8 @@
-name: "dl_ai_${PROJ_PREFIX}"
+name: "dl_ai${PROJ_PREFIX}"
 services:
   # Основной сервис 
   web:
-    container_name: "dl_ai_web_${PROJ_PREFIX}"
+    container_name: "dl_ai_web${PROJ_PREFIX}"
     
     build:
       context: .
@@ -71,19 +71,19 @@ services:
     networks:
       - shared-network
 
-  # Планировщик под самим основным сервисом
-  # scheduler:
-  #   build: .
-  #   container_name: "dl_ai_web_scheduler_${PROJ_PREFIX}"
-  #   command: python manage.py scheduler
-  #   env_file: [.env]
-  #   depends_on: [db, redis]
-  #   restart: unless-stopped
-  #   networks: [shared-network]
+  Планировщик под самим основным сервисом
+  scheduler:
+    build: .
+    container_name: "dl_ai_web_scheduler${PROJ_PREFIX}"
+    command: python manage.py scheduler
+    env_file: [.env]
+    depends_on: [db, redis]
+    restart: unless-stopped
+    networks: [shared-network]
 
   db:
     image: postgres:14
-    container_name: "dl_ai_db_${PROJ_PREFIX}"
+    container_name: "dl_ai_db${PROJ_PREFIX}"
     # Без restart-политики db не поднимался следом за остальными после
     # перезагрузки WSL/хоста — web из-за этого циклился на migrate-retry.
     restart: unless-stopped
@@ -98,7 +98,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: "dl_ai_redis_${PROJ_PREFIX}"
+    container_name: "dl_ai_redis${PROJ_PREFIX}"
     restart: unless-stopped
     volumes:
       - redis_data:/data
@@ -113,7 +113,7 @@ services:
 
   nginx:
     image: nginx:latest
-    container_name: "dl_ai_nginx_${PROJ_PREFIX}"
+    container_name: "dl_ai_nginx${PROJ_PREFIX}"
     restart: unless-stopped
     ports:
       - "${AI_NGINX_BIND:-0.0.0.0}:${AI_NGINX_PORT:-8080}:80"
@@ -128,13 +128,13 @@ services:
 
 volumes:
   postgres_data:
-    name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}_${PROJ_PREFIX}"
+    name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}${PROJ_PREFIX}"
   redis_data:
-    name: "${REDIS_VOLUME_NAME:-dlai_redis_data}_${PROJ_PREFIX}"
+    name: "${REDIS_VOLUME_NAME:-dlai_redis_data}${PROJ_PREFIX}"
   static_volume:
   WebPools_node_modules:
   WebPools_puppeteer_cache:
 
 networks:
   shared-network:
-    name: "${DOCKER_NETWORK_NAME:-dlai-network}_${PROJ_PREFIX}"
+    name: "${DOCKER_NETWORK_NAME:-dlai-network}${PROJ_PREFIX}"

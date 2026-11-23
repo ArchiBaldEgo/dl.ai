@@ -16,7 +16,7 @@ class Command(BaseCommand):
     scheduler = BlockingScheduler(timezone=timezone.get_current_timezone())
     scheduler.add_job(
       weekly,
-      CronTrigger(day_of_week="mon", hour=3, minute=0),
+      CronTrigger(day_of_week="mon", hour=12, minute=40),
       id="weekly",
       max_instances=1,
       coalesce=True,

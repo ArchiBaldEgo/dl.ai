@@ -10,7 +10,7 @@ from django.forms import Form, ModelForm, EmailField, TextInput, CharField, Text
 from ai.email import send_email_message_dl
 from ai.models import UserToEmailDictionary
 
-from .reg import can_access
+from .reg import can_access, TITLE
 
 from ai.admin.site import ai_admin_site
 
@@ -68,7 +68,7 @@ def view(request: HttpRequest) -> TemplateResponse:
 
     context = {
         **ai_admin_site.each_context(request),
-        "title": "Emails",
+        "title": TITLE,
         "form": form,
         "email_form": email_form,   # <-- новый
         "rows": qs,
