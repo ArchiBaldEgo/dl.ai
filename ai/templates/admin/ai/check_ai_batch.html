@@ -1,0 +1,64 @@
+{% extends "admin/base_site.html" %}
+{% load static tz %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=7">
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/ai/check_ai/batch_check.js' %}?v=2" defer></script>
+{% endblock %}
+
+{% block content %}
+{% include "admin/ai/_check_ai_tabs.html" %}
+
+{% if batch %}
+  <p><a id="check-ai-new-batch" class="button default" href="{% url 'ai_check_ai_batch' %}">Новая пакетная проверка</a></p>
+  <section id="check-ai-batch-results" class="module" data-poll="{% if not done %}true{% endif %}">
+    {% include "admin/ai/_check_ai_batch_results.html" %}
+  </section>
+{% else %}
+<form id="check-ai-batch-form" class="module" action="{% url 'ai_check_ai_batch' %}" method="post"
+      enctype="multipart/form-data" data-extensions="{{ extensions }}" data-ignored-folders="{{ ignored_folders }}"
+      data-max-files="{{ max_files }}" data-max-batch-mib="{{ max_batch_mib }}">
+  {% csrf_token %}
+  {{ batch_form.submission_id }}
+  <fieldset class="aligned">
+    <div class="form-row">
+      {{ batch_form.name.label_tag }}
+      {{ batch_form.name }}
+    </div>
+    <div class="form-row">
+      <label for="check-ai-folders">Добавить папку</label>
+      <input type="file" id="check-ai-folders" webkitdirectory multiple>
+    </div>
+    <div class="form-row">
+      <label for="check-ai-files">Добавить файлы</label>
+      <input type="file" id="check-ai-files" multiple accept="{{ extensions }}">
+    </div>
+    <div class="form-row">
+      <p>До {{ max_files }} исходников, {{ max_file_mib }} МиБ на файл и {{ max_batch_mib }} МиБ на пакет. Поддерживаемые файлы будут отправлены в Pangram.</p>
+      <p id="check-ai-selection" aria-live="polite">Исходники не выбраны.</p>
+      <p id="check-ai-batch-error" class="errornote" role="alert" hidden></p>
+    </div>
+  </fieldset>
+  <div class="submit-row">
+    <button type="button" class="button" id="check-ai-clear" disabled>Очистить выбор</button>
+    <button type="submit" class="button default" disabled>Поставить в очередь</button>
+  </div>
+</form>
+{% endif %}
+
+{% if recent_batches %}
+  <section class="module">
+    <h2>Последние пакеты</h2>
+    <ul>
+      {% for item in recent_batches %}
+        <li><a href="{% url 'ai_check_ai_batch_detail' item.pk %}">{{ item.display_name }} от {{ item.created_at|timezone:"Europe/Moscow"|date:"d.m.Y H:i" }}</a>{% if real_super_user %} · {{ item.checker_name }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </section>
+{% endif %}
+{% endblock %}

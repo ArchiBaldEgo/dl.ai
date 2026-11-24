@@ -40,6 +40,49 @@ def replace_placeholders(base, language="", topic="", message="", code=""):
     return base
 
 
+class AICheckBatch(models.Model):
+    NAME_MAX_LENGTH = 120
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    checker_name = models.CharField(max_length=320)
+    skipped_count = models.PositiveIntegerField(default=0)
+    name = models.CharField(max_length=NAME_MAX_LENGTH, blank=True, default="")
+    submission_id = models.UUIDField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["created_by", "submission_id"], name="ai_check_batch_submit_once"),
+        ]
+
+    @property
+    def display_name(self):
+        return self.name or f"Пакет №{self.pk}"
+
+
+class AICheckBatchFile(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = "queued", "В очереди"
+        RUNNING = "running", "Проверяется"
+        DONE = "done", "Проверен"
+        ERROR = "error", "Ошибка"
+
+    batch = models.ForeignKey(AICheckBatch, on_delete=models.CASCADE, related_name="files")
+    relative_path = models.CharField(max_length=1024)
+    status = models.CharField(max_length=8, choices=Status.choices, default=Status.QUEUED)
+    source_text = models.TextField(blank=True)
+    result = models.JSONField(default=dict, blank=True)
+    error = models.TextField(blank=True)
+    checked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "id"], name="ai_check_file_queue_idx")]
+
+    @property
+    def filename(self):
+        return self.relative_path.rsplit("/", 1)[-1]
+
+
 class ExternalDLAccount(models.Model):
     """Link between Django User and external DL (dl.gsu.by) account."""
     user = models.OneToOneField(

@@ -38,6 +38,8 @@ _ADMIN_SCOPES_BY_PATH = (
     ("/ai/admin/ai/tokens/", "admin_tokens"),
     ("/ai/admin/user-models/", "admin_user_models"),
     ("/ai/admin/dl-api-requests/", "admin_dl_api_requests"),
+    (CHECK_AI_ADMIN_PATH + "batch/", "admin_check_ai_batch"),
+    (CHECK_AI_ADMIN_PATH + "protocol/", "admin_check_ai_protocol"),
     (CHECK_AI_ADMIN_PATH, "admin_check_ai"),
 )
 
@@ -107,7 +109,7 @@ def wizard_context_for_request(request):
         "version": WIZARD_VERSION,
         # На странице проверки пользователь сам открывает подсказки кнопкой «?».
         "show": (
-            scope != "admin_check_ai"
+            not scope.startswith("admin_check_ai")
             and not is_viewing_as_guest(request)
             and should_show_wizard(user, scope)
         ),

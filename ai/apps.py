@@ -1,8 +1,8 @@
 """Конфигурация Django-приложения ai.
 
-При ready() подключает сигнал post_migrate для создания группы prompt_developer
-и запускает планировщик проверки доступности моделей (если не отключён
-через AI_DISABLE_HEALTH_SCHEDULER и запущен через daphne/gunicorn/uvicorn/runserver).
+При ready() подключает сигнал post_migrate для создания группы prompt_developer.
+В процессе веб-сервера запускает очередь пакетной проверки и планировщик
+проверки доступности моделей.
 """
 
 import os
@@ -50,9 +50,6 @@ class AiConfig(AppConfig):
         # Подключаем сигналы (инвалидация кеша UpdateLog)
         from . import signals  # noqa: F401
 
-        if os.getenv("AI_DISABLE_HEALTH_SCHEDULER", "").strip().lower() in {"1", "true", "yes", "on"}:
-            return
-
         argv = [arg.lower() for arg in sys.argv]
         executable = argv[0] if argv else ""
 
@@ -62,10 +59,16 @@ class AiConfig(AppConfig):
                 return
 
             # Avoid duplicate scheduler thread from Django autoreloader parent process.
-            if os.getenv("RUN_MAIN") != "true":
+            if os.getenv("RUN_MAIN") != "true" and "--noreload" not in argv:
                 return
 
         elif not any(name in executable for name in ("daphne", "gunicorn", "uvicorn")):
+            return
+
+        from .services.check_ai_queue import start_check_ai_worker
+        start_check_ai_worker()
+
+        if os.getenv("AI_DISABLE_HEALTH_SCHEDULER", "").strip().lower() in {"1", "true", "yes", "on"}:
             return
 
         from .model_health import start_model_health_scheduler
