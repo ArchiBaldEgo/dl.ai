@@ -14,7 +14,6 @@ from .permissions import can_access_check_ai
 from .site import ai_admin_site
 
 MAX_INPUT_MIB = 1
-MAX_INPUT_BYTES = MAX_INPUT_MIB * 1024 * 1024
 MAX_INPUT_LABEL = f"{MAX_INPUT_MIB} МиБ"
 SHORT_INPUT_WORDS = 50
 
@@ -34,6 +33,8 @@ def _decode_uploaded_text(content: bytes) -> str:
 
 
 class CheckAiForm(forms.Form):
+    max_input_mib = MAX_INPUT_MIB
+
     text = forms.CharField(
         label="Текст решения",
         required=False,
@@ -68,9 +69,10 @@ class CheckAiForm(forms.Form):
         upload = data["file"]
         if text.strip() and upload:
             raise forms.ValidationError("Выберите один способ: вставьте текст или загрузите файл.")
+        max_bytes = self.max_input_mib * 1024 * 1024
         if upload:
-            if upload.size > MAX_INPUT_BYTES:
-                raise forms.ValidationError(f"Максимальный размер файла — {MAX_INPUT_LABEL}.")
+            if upload.size > max_bytes:
+                raise forms.ValidationError(f"Максимальный размер файла — {self.max_input_mib} МиБ.")
             try:
                 text = _decode_uploaded_text(upload.read())
             except UnicodeDecodeError as exc:
@@ -84,8 +86,8 @@ class CheckAiForm(forms.Form):
         has_control_characters = upload and re.search(r"[\x01-\x08\x0e-\x1f\x7f-\x9f]", text)
         if "\x00" in text or has_control_characters:
             raise forms.ValidationError("Для проверки нужен обычный текст или исходный код.")
-        if len(text.encode("utf-8")) > MAX_INPUT_BYTES:
-            raise forms.ValidationError(f"Максимальный размер текста — {MAX_INPUT_LABEL}.")
+        if len(text.encode("utf-8")) > max_bytes:
+            raise forms.ValidationError(f"Максимальный размер текста — {self.max_input_mib} МиБ.")
         data["text"] = text
         return data
 

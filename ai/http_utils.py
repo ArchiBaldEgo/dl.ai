@@ -10,9 +10,9 @@ from .external_auth import get_external_session_cookie_name
 
 
 def csrf_failure_view(request, reason=""):
-    if request.path_info == CHECK_AI_ADMIN_PATH:
+    if request.path_info.startswith(CHECK_AI_ADMIN_PATH):
         message = "Не удалось подтвердить отправку формы. Откройте страницу заново и повторите проверку."
-        if request.GET.get("format") == "json":
+        if request.GET.get("format") == "json" or request.headers.get("Accept") == "application/json":
             return JsonResponse({"error": message}, status=403)
         return HttpResponseForbidden(message)
     return csrf_failure(request, reason=reason)

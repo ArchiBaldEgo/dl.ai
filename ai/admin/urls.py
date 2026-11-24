@@ -37,6 +37,11 @@ from .arm import (
     admin_arm_solve_result_download_view,
     admin_arm_solve_result_body_view,
 )
+from .batch_check import (
+    admin_check_ai_batch_detail_view,
+    admin_check_ai_batch_view,
+    admin_check_ai_protocol_view,
+)
 from .check_ai import admin_check_ai_view
 from .dl_api_requests import (
     admin_dl_api_request_create_view,
@@ -173,6 +178,9 @@ def get_ai_admin_urls():
         path("prompts/lab/result/<int:result_id>/body/", ai_admin_site.admin_view(admin_prompt_lab_result_body_view), name="ai_prompt_lab_result_body"),
         path("prompts/lab/", ai_admin_site.admin_view(admin_prompt_lab_view), name="ai_prompt_lab"),
         path("check-ai/", ai_admin_site.admin_view(admin_check_ai_view), name="ai_check_ai"),
+        path("check-ai/batch/", ai_admin_site.admin_view(admin_check_ai_batch_view), name="ai_check_ai_batch"),
+        path("check-ai/batch/<int:batch_id>/", ai_admin_site.admin_view(admin_check_ai_batch_detail_view), name="ai_check_ai_batch_detail"),
+        path("check-ai/protocol/", ai_admin_site.admin_view(admin_check_ai_protocol_view), name="ai_check_ai_protocol"),
         path("ai-groups/<int:group_id>/save/", ai_admin_site.admin_view(admin_access_group_save_view), name="ai_access_group_save"),
         path("ai-groups/<int:group_id>/delete/", ai_admin_site.admin_view(admin_access_group_delete_view), name="ai_access_group_delete"),
         path("ai-groups/<int:group_id>/members/search/", ai_admin_site.admin_view(admin_access_group_member_search_view), name="ai_access_group_member_search"),

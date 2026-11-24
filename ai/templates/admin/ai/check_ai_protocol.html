@@ -1,0 +1,46 @@
+{% extends "admin/base_site.html" %}
+{% load static tz %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=6">
+{% endblock %}
+
+{% block content %}
+{% include "admin/ai/_check_ai_tabs.html" %}
+<div id="check-ai-protocol" class="module">
+  <table>
+    <colgroup>
+      <col class="check-ai-protocol-date">
+      <col class="check-ai-protocol-checker">
+      <col>
+      <col class="check-ai-protocol-result">
+    </colgroup>
+    <thead>
+      <tr><th>Дата и время</th><th>Кто проверил</th><th>Название программы</th><th>Результат проверки</th></tr>
+    </thead>
+    <tbody>
+      {% for item in page_obj %}
+        <tr>
+          <td>{{ item.checked_at|timezone:"Europe/Moscow"|date:"d.m.Y H:i" }}</td>
+          <td title="{{ item.batch.checker_name }}">{{ item.batch.checker_name }}</td>
+          <td><a href="{% url 'ai_check_ai_batch_detail' item.batch_id %}" title="{{ item.relative_path }}">{{ item.filename }}</a></td>
+          <td{% if item.error %} title="{{ item.error }}"{% endif %}>
+            {% if item.status == "done" %}{% include "admin/ai/_check_ai_scores.html" with result=item.result compact=True only %}
+            {% else %}{{ item.error }}{% endif %}
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4">Завершённых пакетных проверок пока нет.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if page_obj.has_other_pages %}
+    <p class="paginator">
+      {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}">Назад</a>{% endif %}
+      Страница {{ page_obj.number }} из {{ page_obj.paginator.num_pages }}
+      {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}">Далее</a>{% endif %}
+    </p>
+  {% endif %}
+</div>
+{% endblock %}
