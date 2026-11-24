@@ -43,12 +43,17 @@ def replace_placeholders(base, language="", topic="", message="", code=""):
 class AICheckBatch(models.Model):
     NAME_MAX_LENGTH = 120
 
-    created_at = models.DateTimeField(auto_now_add=True)
+    class Kind(models.TextChoices):
+        BATCH = "batch", "Пакетная"
+        SINGLE = "single", "Одиночная"
+
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
     checker_name = models.CharField(max_length=320)
     skipped_count = models.PositiveIntegerField(default=0)
     name = models.CharField(max_length=NAME_MAX_LENGTH, blank=True, default="")
     submission_id = models.UUIDField(null=True, blank=True)
+    kind = models.CharField(max_length=6, choices=Kind.choices, default=Kind.BATCH)
 
     class Meta:
         constraints = [
@@ -57,7 +62,8 @@ class AICheckBatch(models.Model):
 
     @property
     def display_name(self):
-        return self.name or f"Пакет №{self.pk}"
+        prefix = "Проверка" if self.kind == self.Kind.SINGLE else "Пакет"
+        return self.name or f"{prefix} №{self.pk}"
 
 
 class AICheckBatchFile(models.Model):

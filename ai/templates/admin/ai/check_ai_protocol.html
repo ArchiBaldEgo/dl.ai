@@ -3,7 +3,12 @@
 
 {% block extrastyle %}
   {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=6">
+  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=10">
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin/ai/check_ai/protocol.js' %}" defer></script>
 {% endblock %}
 
 {% block content %}
@@ -17,21 +22,49 @@
       <col class="check-ai-protocol-result">
     </colgroup>
     <thead>
-      <tr><th>Дата и время</th><th>Кто проверил</th><th>Название программы</th><th>Результат проверки</th></tr>
+      <tr><th title="Дата и время запуска">Дата и время</th><th>Кто проверил</th><th>Название проверки</th><th>Результат проверки</th></tr>
     </thead>
     <tbody>
-      {% for item in page_obj %}
+      {% for check in page_obj %}
         <tr>
-          <td>{{ item.checked_at|timezone:"Europe/Moscow"|date:"d.m.Y H:i" }}</td>
-          <td title="{{ item.batch.checker_name }}">{{ item.batch.checker_name }}</td>
-          <td><a href="{% url 'ai_check_ai_batch_detail' item.batch_id %}" title="{{ item.relative_path }}">{{ item.filename }}</a></td>
-          <td{% if item.error %} title="{{ item.error }}"{% endif %}>
-            {% if item.status == "done" %}{% include "admin/ai/_check_ai_scores.html" with result=item.result compact=True only %}
-            {% else %}{{ item.error }}{% endif %}
+          <td>{{ check.created_at|timezone:"Europe/Moscow"|date:"d.m.Y H:i" }}</td>
+          <td title="{{ check.checker_name }}">{{ check.checker_name }}</td>
+          {% if check.kind == "batch" %}
+          <td>
+            <div class="check-ai-protocol-name">
+              <button type="button" class="button" aria-expanded="false" aria-controls="check-ai-programs-{{ check.pk }}"
+                      data-programs-url="{% url 'ai_check_ai_batch_detail' check.pk %}?fragment=programs">Развернуть</button>
+              <a href="{% url 'ai_check_ai_batch_detail' check.pk %}" title="{{ check.display_name }}">{{ check.display_name }}</a>
+            </div>
           </td>
+          <td>
+            {% if check.processed_count == check.file_count and check.average_ai != None %}
+              Средний ИИ {{ check.average_ai|floatformat:1 }}% · файлов {{ check.file_count }}
+            {% else %}
+              Обработано {{ check.processed_count }} из {{ check.file_count }}
+            {% endif %}
+            {% if check.error_count %} · ошибок {{ check.error_count }}{% endif %}
+          </td>
+          {% else %}
+            {% with item=check.single_files.0 %}
+              <td title="{{ check.display_name }} · {{ item.relative_path }}">{{ check.display_name }} <small class="check-ai-protocol-type">· Одиночная</small></td>
+              <td{% if item.error %} title="{{ item.error }}"{% endif %}>
+                {% if item.status == "done" %}
+                  {% include "admin/ai/_check_ai_scores.html" with result=item.result compact=True only %}
+                {% else %}
+                  {{ item.error }}
+                {% endif %}
+              </td>
+            {% endwith %}
+          {% endif %}
         </tr>
+        {% if check.kind == "batch" %}
+          <tr id="check-ai-programs-{{ check.pk }}" class="check-ai-protocol-detail" hidden>
+            <td colspan="4" data-programs-content></td>
+          </tr>
+        {% endif %}
       {% empty %}
-        <tr><td colspan="4">Завершённых пакетных проверок пока нет.</td></tr>
+        <tr><td colspan="4">Проверок пока нет.</td></tr>
       {% endfor %}
     </tbody>
   </table>

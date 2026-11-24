@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -11,6 +11,7 @@ from django.urls import reverse
 from .admin.batch_check import (
     _result_tree, _submit_batch, admin_check_ai_batch_detail_view, admin_check_ai_protocol_view,
 )
+from .admin.check_ai import admin_check_ai_view
 from .models import AICheckBatch, AICheckBatchFile
 from .services.check_ai_queue import process_next_file
 from .services.pangram_client import PangramError
@@ -110,17 +111,30 @@ class CheckAiBatchTests(TestCase):
 
     @patch("ai.admin.batch_check.can_access_check_ai", return_value=True)
     def test_detail_and_protocol_do_not_show_other_users_results(self, _can_access):
-        batch = AICheckBatch.objects.create(created_by=self.user, checker_name="checker")
+        batch = AICheckBatch.objects.create(created_by=self.user, checker_name="checker", name="Первая проверка")
+        started = datetime(2026, 11, 24, 21, 30, tzinfo=UTC)
+        AICheckBatch.objects.filter(pk=batch.pk).update(created_at=started)
         batch.files.create(
             relative_path="Group/main.py",
             status=AICheckBatchFile.Status.ERROR,
-            checked_at=datetime(2026, 11, 24, 21, 30, tzinfo=UTC),
+            checked_at=started,
             error="Ошибка проверки.",
         )
+        for index, score in enumerate([0.0, 80.0]):
+            batch.files.create(
+                relative_path=f"Group/{index}.py",
+                status=AICheckBatchFile.Status.DONE,
+                checked_at=started,
+                result={"ai_percent": score},
+            )
         stranger = get_user_model().objects.create_user(username="other")
-        request = self.requests.get(reverse("ai_check_ai_batch_detail", args=[batch.pk]))
+        request = self.requests.get(reverse("ai_check_ai_batch_detail", args=[batch.pk]), {"fragment": "programs"})
         request.user = stranger
         self.assertEqual(admin_check_ai_batch_detail_view(request, batch.pk).status_code, 404)
+        request.user = self.user
+        fragment = admin_check_ai_batch_detail_view(request, batch.pk).render()
+        self.assertContains(fragment, "Group/main.py")
+        self.assertContains(fragment, "Ошибка проверки.")
 
         request = self.requests.get(reverse("ai_check_ai_protocol"))
         request.session = {}
@@ -130,5 +144,54 @@ class CheckAiBatchTests(TestCase):
         request.user = self.user
         response = admin_check_ai_protocol_view(request)
         self.assertEqual(len(response.context_data["page_obj"]), 1)
-        self.assertContains(response.render(), "Group/main.py")
+        self.assertContains(response.render(), ">Первая проверка</a>", count=1)
+        self.assertContains(response, "Средний ИИ 40.0% · файлов 3")
+        self.assertContains(response, "· ошибок 1")
+        self.assertNotContains(response, "Group/main.py")
         self.assertContains(response, "<td>25.11.2026 00:30</td>")
+
+        # Протокол включает и пакеты, которые уже выпали из списка последних десяти.
+        newer = AICheckBatch.objects.bulk_create(
+            [AICheckBatch(created_by=self.user, checker_name="checker") for _ in range(10)]
+        )
+        AICheckBatch.objects.filter(pk__in=[item.pk for item in newer]).update(
+            created_at=started + timedelta(minutes=1)
+        )
+        AICheckBatchFile.objects.bulk_create(
+            [AICheckBatchFile(batch=item, relative_path="a.py") for item in newer]
+        )
+        response = admin_check_ai_protocol_view(request)
+        self.assertEqual(len(response.context_data["page_obj"]), 11)
+        self.assertEqual(response.context_data["page_obj"][-1].pk, batch.pk)
+        self.assertContains(response.render(), ">Первая проверка</a>", count=1)
+        self.assertContains(response, "Обработано 0 из 1", count=10)
+
+    @patch("ai.admin.batch_check.can_access_check_ai", return_value=True)
+    @patch("ai.admin.check_ai.can_access_check_ai", return_value=True)
+    @patch("ai.admin.check_ai.check_text")
+    def test_single_checks_are_named_and_saved_in_protocol(self, check_text, _single_access, _protocol_access):
+        check_text.side_effect = [
+            {"ai_percent": 24.0, "ai_assisted_percent": 1.0, "human_percent": 75.0},
+            PangramError(502, "Временная ошибка Pangram."),
+        ]
+        single_url = reverse("ai_check_ai") + "?format=json"
+        request = self.requests.post(single_url, {"text": "x = 1", "name": "  Одиночный пример  "})
+        request.user = self.user
+        self.assertEqual(admin_check_ai_view(request).status_code, 200)
+        request = self.requests.post(single_url, {"file": SimpleUploadedFile("example.py", b"x = 2")})
+        request.user = self.user
+        self.assertEqual(admin_check_ai_view(request).status_code, 502)
+
+        checks = list(AICheckBatch.objects.order_by("pk"))
+        self.assertEqual([item.kind for item in checks], [AICheckBatch.Kind.SINGLE] * 2)
+        self.assertEqual(checks[0].display_name, "Одиночный пример")
+        self.assertEqual(checks[1].files.get().relative_path, "example.py")
+        self.assertFalse(AICheckBatchFile.objects.exclude(source_text="").exists())
+        request = self.requests.get(reverse("ai_check_ai_protocol"))
+        request.session = {}
+        request.user = self.user
+        response = admin_check_ai_protocol_view(request).render()
+        self.assertContains(response, "Одиночный пример")
+        self.assertContains(response, "ИИ 24.0%")
+        self.assertContains(response, "Временная ошибка Pangram.")
+        self.assertNotContains(response, "data-programs-url")

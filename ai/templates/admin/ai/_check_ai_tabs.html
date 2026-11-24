@@ -1,5 +1,5 @@
-<nav class="check-ai-tabs" aria-label="Разделы проверки на ИИ">
-  <a href="{% url 'ai_check_ai' %}"{% if check_ai_tab == 'single' %} aria-current="page"{% endif %}>Одиночная</a>
-  <a href="{% url 'ai_check_ai_batch' %}"{% if check_ai_tab == 'batch' %} aria-current="page"{% endif %}>Пакетная</a>
-  <a href="{% url 'ai_check_ai_protocol' %}"{% if check_ai_tab == 'protocol' %} aria-current="page"{% endif %}>Протокол</a>
+<nav class="check-ai-tabs{% if check_ai_tab == 'batch' and not batch %} check-ai-tabs--upload{% endif %}" aria-label="Разделы проверки на ИИ">
+  <a href="{% url 'ai_check_ai' %}" data-check-ai-section="single"{% if check_ai_tab == 'single' %} aria-current="page"{% endif %}>Одиночная</a>
+  <a href="{% url 'ai_check_ai_batch' %}" data-check-ai-section="batch"{% if check_ai_tab == 'batch' %} aria-current="page"{% endif %}>Пакетная</a>
+  <a href="{% url 'ai_check_ai_protocol' %}" data-check-ai-section="protocol"{% if check_ai_tab == 'protocol' %} aria-current="page"{% endif %}>Протокол</a>
 </nav>

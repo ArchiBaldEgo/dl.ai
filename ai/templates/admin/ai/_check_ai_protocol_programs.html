@@ -1,0 +1,18 @@
+{% if items %}
+  <dl class="check-ai-protocol-programs">
+    {% for item in items %}
+      <dt>{{ item.relative_path }}</dt>
+      <dd>
+        {% if item.status == "done" %}
+          {% include "admin/ai/_check_ai_scores.html" with result=item.result compact=True only %}
+        {% elif item.error %}
+          {{ item.error }}
+        {% else %}
+          {{ item.get_status_display }}
+        {% endif %}
+      </dd>
+    {% endfor %}
+  </dl>
+{% else %}
+  <p>В пакете нет программ.</p>
+{% endif %}

@@ -4,11 +4,14 @@ import codecs
 import re
 
 from django import forms
+from django.db import transaction
 from django.http import HttpResponseForbidden, JsonResponse
 from django.template.response import TemplateResponse
+from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
 from ..constants import CHECK_AI_TITLE
+from ..models import AICheckBatch, AICheckBatchFile
 from ..services.pangram_client import PangramError, check_text
 from .permissions import can_access_check_ai
 from .site import ai_admin_site
@@ -32,9 +35,23 @@ def _decode_uploaded_text(content: bytes) -> str:
         return content.decode("cp1251")
 
 
+def check_name_field():
+    return forms.CharField(
+        label="Название проверки",
+        required=False,
+        max_length=AICheckBatch.NAME_MAX_LENGTH,
+        widget=forms.TextInput(attrs={"placeholder": "Необязательно"}),
+        error_messages={
+            "max_length": f"Название проверки должно быть не длиннее {AICheckBatch.NAME_MAX_LENGTH} символов.",
+            "null_characters_not_allowed": "Название содержит недопустимый нулевой символ.",
+        },
+    )
+
+
 class CheckAiForm(forms.Form):
     max_input_mib = MAX_INPUT_MIB
 
+    name = check_name_field()
     text = forms.CharField(
         label="Текст решения",
         required=False,
@@ -92,6 +109,26 @@ class CheckAiForm(forms.Form):
         return data
 
 
+def _record_single_check(user, data, started_at, result, error):
+    # Одиночная проверка сразу записывается с итогом. Текст в базе не нужен.
+    status = AICheckBatchFile.Status.DONE if result is not None else AICheckBatchFile.Status.ERROR
+    with transaction.atomic():
+        check = AICheckBatch.objects.create(
+            kind=AICheckBatch.Kind.SINGLE,
+            created_by=user,
+            created_at=started_at,
+            checker_name=user.get_full_name() or user.get_username(),
+            name=data["name"],
+        )
+        check.files.create(
+            relative_path=data["file"].name if data["file"] else "Текст решения",
+            status=status,
+            result=result or {},
+            error=error or "",
+            checked_at=timezone.now(),
+        )
+
+
 @require_http_methods(["GET", "POST"])
 def admin_check_ai_view(request):
     if not can_access_check_ai(request):
@@ -105,11 +142,13 @@ def admin_check_ai_view(request):
         form = CheckAiForm(request.POST, request.FILES)
         if form.is_valid():
             text = form.cleaned_data["text"]
+            started_at = timezone.now()
             try:
                 result = check_text(text)
                 result["short_input"] = len(text.split()) < SHORT_INPUT_WORDS
             except PangramError as exc:
                 status, error = exc.status, str(exc)
+            _record_single_check(request.user, form.cleaned_data, started_at, result, error)
         else:
             status = 400
 

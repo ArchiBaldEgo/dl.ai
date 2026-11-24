@@ -6,6 +6,9 @@ from uuid import uuid4
 from django import forms
 from django.core.paginator import Paginator
 from django.db import transaction
+from django.db.models import Avg, Count, FloatField, Prefetch, Q
+from django.db.models.fields.json import KeyTextTransform
+from django.db.models.functions import Cast
 from django.http import HttpResponseForbidden, HttpResponseNotFound, JsonResponse
 from django.template.response import TemplateResponse
 from django.urls import reverse
@@ -13,7 +16,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods
 
 from ..models import AICheckBatch, AICheckBatchFile
-from .check_ai import CheckAiForm, SHORT_INPUT_WORDS
+from .check_ai import CheckAiForm, SHORT_INPUT_WORDS, check_name_field
 from .permissions import can_access_check_ai, is_superuser_user
 from .site import ai_admin_site
 
@@ -34,16 +37,7 @@ class BatchCheckFileForm(CheckAiForm):
 
 
 class BatchCheckForm(forms.Form):
-    name = forms.CharField(
-        label="Название проверки",
-        required=False,
-        max_length=AICheckBatch.NAME_MAX_LENGTH,
-        widget=forms.TextInput(attrs={"placeholder": "Необязательно"}),
-        error_messages={
-            "max_length": f"Название проверки должно быть не длиннее {AICheckBatch.NAME_MAX_LENGTH} символов.",
-            "null_characters_not_allowed": "Название содержит недопустимый нулевой символ.",
-        },
-    )
+    name = check_name_field()
     submission_id = forms.UUIDField(
         required=False,
         widget=forms.HiddenInput,
@@ -61,7 +55,7 @@ def _batch_created_response(batch):
     return JsonResponse({"url": detail_url}, status=201)
 
 
-def _batches_for(user):
+def _checks_for(user):
     if is_superuser_user(user):
         return AICheckBatch.objects.all()
     return AICheckBatch.objects.filter(created_by=user)
@@ -153,7 +147,7 @@ def _batch_page(request, **context):
         "title": "Пакетная проверка на ИИ",
         "check_ai_tab": "batch",
         "batch_form": BatchCheckForm(initial={"submission_id": uuid4()}),
-        "recent_batches": _batches_for(request.user).order_by("-id")[:10],
+        "recent_batches": _checks_for(request.user).filter(kind=AICheckBatch.Kind.BATCH).order_by("-id")[:10],
         "extensions": ",".join(sorted(PROGRAM_EXTENSIONS)),
         "ignored_folders": ",".join(sorted(IGNORED_FOLDERS)),
         "max_files": MAX_BATCH_FILES,
@@ -202,10 +196,12 @@ def _result_tree(items):
 def admin_check_ai_batch_detail_view(request, batch_id):
     if not can_access_check_ai(request):
         return HttpResponseForbidden("У вас нет доступа к проверке на ИИ.")
-    batch = _batches_for(request.user).filter(pk=batch_id).first()
+    batch = _checks_for(request.user).filter(pk=batch_id, kind=AICheckBatch.Kind.BATCH).first()
     if batch is None:
         return HttpResponseNotFound("Пакет проверки не найден.")
     items = list(batch.files.defer("source_text").order_by("relative_path"))
+    if request.GET.get("fragment") == "programs":
+        return TemplateResponse(request, "admin/ai/_check_ai_protocol_programs.html", {"items": items})
     finished = sum(item.checked_at is not None for item in items)
     context = {
         "batch": batch,
@@ -223,13 +219,22 @@ def admin_check_ai_batch_detail_view(request, batch_id):
 def admin_check_ai_protocol_view(request):
     if not can_access_check_ai(request):
         return HttpResponseForbidden("У вас нет доступа к проверке на ИИ.")
-    rows = (
-        AICheckBatchFile.objects.filter(batch__in=_batches_for(request.user), checked_at__isnull=False)
-        .select_related("batch").defer("source_text").order_by("-checked_at", "-id")
-    )
+    checks = _checks_for(request.user).annotate(
+        file_count=Count("files"),
+        processed_count=Count("files__checked_at"),
+        error_count=Count("files", filter=Q(files__status=Status.ERROR)),
+        average_ai=Avg(
+            Cast(KeyTextTransform("ai_percent", "files__result"), FloatField()),
+            filter=Q(files__status=Status.DONE),
+        ),
+    ).prefetch_related(Prefetch(
+        "files",
+        queryset=AICheckBatchFile.objects.filter(batch__kind=AICheckBatch.Kind.SINGLE).defer("source_text"),
+        to_attr="single_files",
+    )).order_by("-created_at", "-id")
     return TemplateResponse(request, "admin/ai/check_ai_protocol.html", {
         **ai_admin_site.each_context(request),
         "title": "Протокол проверки на ИИ",
         "check_ai_tab": "protocol",
-        "page_obj": Paginator(rows, 50).get_page(request.GET.get("page")),
+        "page_obj": Paginator(checks, 50).get_page(request.GET.get("page")),
     })
