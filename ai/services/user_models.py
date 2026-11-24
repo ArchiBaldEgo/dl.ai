@@ -42,6 +42,7 @@ from urllib.parse import urlparse
 
 import httpx
 from django.db.models import Q
+from django.utils import timezone
 
 from ..constants import MOSCOW_TZ  # noqa: F401  (единый источник TZ проекта)
 
@@ -320,6 +321,104 @@ def _owner_suffix_title(model) -> str:
     return f"{model.title} — {owner}" if owner else model.title
 
 
+#: Статусы публикации в строках таблиц (JS/шаблоны читают именно их).
+PUBLIC_STATUS_PUBLIC = "public"
+PUBLIC_STATUS_PENDING = "pending"
+PUBLIC_STATUS_REJECTED = "rejected"
+PUBLIC_STATUS_PRIVATE = "private"
+
+
+def public_status_for(model) -> str:
+    """Вычисляемый статус публикации личной модели.
+
+    ``is_public`` — единственный признак фактической публичности; заявка и
+    отметка о рассмотрении лишь объясняют, на каком шаге модерации модель.
+    """
+    if model.is_public:
+        return PUBLIC_STATUS_PUBLIC
+    if model.public_requested:
+        return PUBLIC_STATUS_PENDING
+    if model.public_reviewed_at:
+        return PUBLIC_STATUS_REJECTED
+    return PUBLIC_STATUS_PRIVATE
+
+
+def _public_state_fields(model) -> dict:
+    """Поля строки таблицы, общие для владельца и суперюзера."""
+    from .user_directory import display_name_for_user
+
+    reviewed_by = model.public_reviewed_by if model.public_reviewed_by_id else None
+    return {
+        "public_requested": model.public_requested,
+        "public_status": public_status_for(model),
+        "public_reviewed_at": model.public_reviewed_at,
+        "public_reviewed_by_display": display_name_for_user(reviewed_by) if reviewed_by else "",
+    }
+
+
+def _user_model_label(model) -> str:
+    """Подпись личной модели для журнала: «Название — владелец (личная)»."""
+    owner = _owner_suffix_title(model)
+    return f"{owner} (личная)" if owner else f"{model.title} (личная)"
+
+
+def user_model_labels_for_names(model_names) -> dict:
+    """Карта ``User_<pk>`` → читаемая подпись для журнала запросов.
+
+    Один запрос на пачку ключей (журнал отдаёт 50 строк за раз). Ключи, для
+    которых записи уже нет, тоже получают подпись — иначе в журнале снова
+    появлялся бы сырой ``User_<pk>``.
+    """
+    from ..models import AIUserModel
+
+    keys = {}
+    for raw in model_names or []:
+        text = str(raw or "").strip()
+        if not text.startswith("User_"):
+            continue
+        raw_id = text[5:]
+        if raw_id.isdigit():
+            keys[int(raw_id)] = text
+    if not keys:
+        return {}
+    models = {
+        model.pk: model
+        for model in AIUserModel.objects.filter(pk__in=keys)
+        .select_related("user", "user__external_dl_account")
+    }
+    labels = {}
+    for pk, key in keys.items():
+        model = models.get(pk)
+        labels[key] = (
+            _user_model_label(model)
+            if model is not None
+            else f"{key} (удалённая личная модель)"
+        )
+    return labels
+
+
+def format_model_names(model_names, labels=None) -> str:
+    """Имена моделей для журнала: сырые ключи ``User_<pk>`` → подписи."""
+    names = [str(name) for name in (model_names or []) if str(name or "").strip()]
+    if not names:
+        return "—"
+    if labels is None:
+        labels = user_model_labels_for_names(names)
+    return ", ".join(labels.get(name, name) for name in names)
+
+
+def user_model_filter_choices() -> list:
+    """Личные модели для фильтра «Модель» в журнале (история, не только активные)."""
+    from ..models import AIUserModel
+
+    return [
+        {"key": f"User_{model.pk}", "title": _user_model_label(model)}
+        for model in AIUserModel.objects.select_related(
+            "user", "user__external_dl_account",
+        ).order_by("title")
+    ]
+
+
 def user_model_options(user) -> list:
     """Опции личных моделей для селектора (JSON для фронта)."""
     return [_option(model, "owner") for model in user_models_for(user)]
@@ -487,6 +586,7 @@ def user_model_rows(user) -> list:
     rows = []
     models = (
         AIUserModel.objects.filter(user=user)
+        .select_related("public_reviewed_by")
         .prefetch_related("shared_with", "shared_with__external_dl_account")
         .order_by("title")
     )
@@ -503,6 +603,7 @@ def user_model_rows(user) -> list:
             "supports_think": model.supports_think,
             "is_active": model.is_active,
             "is_public": model.is_public,
+            **_public_state_fields(model),
             "grants": _grant_rows(model),
             "has_key": bool(model.api_key_encrypted),
             "created_at": model.created_at,
@@ -514,16 +615,18 @@ def user_model_rows(user) -> list:
 def admin_user_model_rows() -> list:
     """Все личные модели для суперюзерской таблицы «Все модели».
 
-    Только идентичность и доступ: НИКАКИХ base_url/api_key/model_id/
-    max_tokens/supports_* — суперюзер управляет доступом, но не читает
-    чужие настройки и ключи.
+    Суперюзер видит идентичность и провайдера/ID модели (чтобы понимать,
+    что именно одобряет), но НЕ читает base_url/api_key/max_tokens/
+    supports_* — чужие endpoint'ы, ключи и настройки остаются скрытыми.
     """
     from ..models import AIUserModel
     from .user_directory import display_name_for_user, dl_id_for_user
 
     rows = []
     models = (
-        AIUserModel.objects.select_related("user", "user__external_dl_account")
+        AIUserModel.objects.select_related(
+            "user", "user__external_dl_account", "public_reviewed_by",
+        )
         .prefetch_related("shared_with", "shared_with__external_dl_account")
         .order_by("title")
     )
@@ -533,8 +636,12 @@ def admin_user_model_rows() -> list:
             "title": model.title,
             "owner_display": display_name_for_user(model.user),
             "owner_dl_id": dl_id_for_user(model.user),
+            "provider": model.provider,
+            "provider_label": model.get_provider_display(),
+            "model_id": model.model_id,
             "is_public": model.is_public,
             "is_active": model.is_active,
+            **_public_state_fields(model),
             "grants": _grant_rows(model),
         })
     return rows
@@ -589,9 +696,13 @@ def save_user_model(user, payload: dict) -> tuple:
 
     ``payload`` — словарь с полями: id, title, provider, model_id,
     base_url, api_key, max_tokens, supports_vision, supports_think,
-    is_active, is_public, shared_with (список id получателей). Поля доступа
-    необязательны: если их НЕ передали, текущий доступ не трогаем (старые
-    клиенты и тесты продолжают работать).
+    is_active, public_request, shared_with (список id получателей). Поля
+    доступа необязательны: если их НЕ передали, текущий доступ не трогаем.
+
+    Публичность этим путём НЕ включается: ``public_request=True`` создаёт
+    заявку на модерацию. Старое поле ``is_public`` трактуем как заявку
+    (безопасный backward-compat: старый клиент не может опубликовать модель
+    в обход суперюзера).
     """
     from ..models import AIUserModel
 
@@ -638,7 +749,11 @@ def save_user_model(user, payload: dict) -> tuple:
 
     # Доступ валидируется ДО save(): ошибка не должна оставлять
     # полусозданную запись. ``None`` = поле не передано, значение не меняем.
-    wants_public = payload.get("is_public")
+    public_request = payload.get("public_request")
+    if public_request is None and "is_public" in payload:
+        # Старый клиент присылал is_public напрямую — теперь это только
+        # заявка; фактическую публичность включает суперюзер.
+        public_request = payload.get("is_public")
     share_users, share_error = _resolve_share_users(user, payload.get("shared_with"))
     if share_error:
         return False, share_error, None
@@ -657,6 +772,17 @@ def save_user_model(user, payload: dict) -> tuple:
     else:
         instance = AIUserModel(user=user)
 
+    # Одобрялось конкретное содержимое модели: правка провайдера/ID/адреса/
+    # ключа у опубликованной модели снимает публикацию (нужна новая заявка).
+    # Pending при такой правке остаётся pending — модератор увидит актуальную
+    # конфигурацию.
+    old_config = None
+    if instance.pk:
+        old_config = (
+            instance.provider, instance.model_id, instance.base_url,
+            instance.api_key_encrypted,
+        )
+
     instance.title = title
     instance.provider = provider
     instance.model_id = model_id
@@ -667,21 +793,51 @@ def save_user_model(user, payload: dict) -> tuple:
     instance.supports_vision = bool(payload.get("supports_vision"))
     instance.supports_think = bool(payload.get("supports_think"))
     instance.is_active = bool(payload.get("is_active", True))
-    if wants_public is not None:
-        instance.is_public = _coerce_bool(wants_public)
+
+    new_config = (
+        instance.provider, instance.model_id, instance.base_url,
+        instance.api_key_encrypted,
+    )
+    if old_config is not None and old_config != new_config and instance.is_public:
+        instance.is_public = False
+        instance.public_requested = False
+        instance.public_reviewed_by = None
+        instance.public_reviewed_at = None
+
+    if public_request is not None:
+        wants_public = _coerce_bool(public_request)
+        if wants_public:
+            if not instance.is_public:
+                instance.public_requested = True
+                instance.public_reviewed_by = None
+                instance.public_reviewed_at = None
+        else:
+            instance.public_requested = False
+            if instance.is_public:
+                instance.is_public = False
+            instance.public_reviewed_by = None
+            instance.public_reviewed_at = None
+
     instance.save()
     if share_users is not None:
         instance.shared_with.set(share_users)
     return True, "", instance.pk
 
 
-def set_user_model_access(actor, model_pk, is_public, shared_with_ids) -> tuple:
-    """Изменить ТОЛЬКО доступ к модели: публичность и список получателей.
+def set_user_model_access(
+    actor, model_pk, is_public=None, shared_with_ids=None, public_request=None,
+) -> tuple:
+    """Изменить ТОЛЬКО доступ к модели: заявку/публичность и получателей.
 
     Разрешено владельцу и реальному суперюзеру (режим «Посмотреть как…» —
     нет). Конфигурация модели (название, провайдер, URL, ключ, настройки)
     этой операцией не меняется НИКОГДА: суперюзер управляет доступом, но не
     читает и не правит чужие ключи.
+
+    * владелец: ``public_request=True/False`` — создать/снять заявку;
+      ``is_public`` от владельца запрещён (публикует суперюзер);
+    * суперюзер: ``is_public=True`` — одобрить, ``False`` — отклонить/снять
+      публикацию; ``public_request`` от него не принимается.
 
     Возвращает ``(ok, message)``; чужая приватная модель для не-суперюзера
     — «Модель не найдена» (существование не подтверждаем).
@@ -704,19 +860,47 @@ def set_user_model_access(actor, model_pk, is_public, shared_with_ids) -> tuple:
     # Ленивый импорт: сервисы не должны тянуть admin на загрузке модуля.
     from ..admin.permissions import is_superuser_user
 
+    is_superuser = is_superuser_user(actor)
     is_owner = instance.user_id == getattr(actor, "pk", None)
-    if not is_owner and not is_superuser_user(actor):
+    if not is_owner and not is_superuser:
         return False, "Модель не найдена"
+
+    if not is_superuser and is_public is not None:
+        # Владелец не может включить/выключить публичность в обход модерации.
+        return False, "Публикацию подтверждает суперпользователь"
+    if is_superuser and public_request is not None:
+        return False, "Заявку рассматривает суперпользователь"
 
     share_users, share_error = _resolve_share_users(instance.user, shared_with_ids)
     if share_error:
         return False, share_error
 
+    changed = False
+    if is_superuser and is_public is not None:
+        instance.is_public = _coerce_bool(is_public)
+        instance.public_requested = False
+        instance.public_reviewed_by = actor
+        instance.public_reviewed_at = timezone.now()
+        changed = True
+    elif public_request is not None:
+        wants_public = _coerce_bool(public_request)
+        if wants_public:
+            if not instance.is_public:
+                instance.public_requested = True
+                instance.public_reviewed_by = None
+                instance.public_reviewed_at = None
+        else:
+            instance.public_requested = False
+            if instance.is_public:
+                instance.is_public = False
+            instance.public_reviewed_by = None
+            instance.public_reviewed_at = None
+        changed = True
+
     # ``None`` = поле не передано → не трогаем соответствующую настройку
     # (запрос «только публичность» не должен молча снимать все гранты).
-    if is_public is not None:
-        instance.is_public = _coerce_bool(is_public)
-        instance.save(update_fields=["is_public", "updated_at"])
+    if changed:
+        instance.save()
     if share_users is not None:
         instance.shared_with.set(share_users)
     return True, ""

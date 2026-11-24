@@ -1,0 +1,15 @@
+int __bits(8) x[10];
+int __out __bits(8) res;
+
+
+void main(){
+int i;
+int sump=0;
+int sumo=0;
+
+for (i=0; i<10; i++){
+if (x[i]>0) sump=sump+x[i];
+if (x[i]<0) sumo=(sumo+x[i])*(-1);
+}
+y=sump%sumo;
+}

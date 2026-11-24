@@ -1,0 +1,29 @@
+int __bits(8) x[10];
+
+unsigned int __out __bits(8) res;
+
+void abs(unsigned __bits(8) x) {
+if (x < 0) {
+x = -x;
+}
+}
+
+void main() {
+unsigned int __bits(8) s1 = 0;
+unsigned int __bits(8) s2 = 0;
+for (unsigned int __bits(8) i = 0; i < 10; i++) {
+if (x[i] >= 0) {
+s1 += x[i];
+}
+else {
+s2 += x[i];
+}
+}
+if (s2 != 0) {
+res = s1 % s2;
+}
+else {
+res = 0;
+}
+
+}

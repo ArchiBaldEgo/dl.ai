@@ -1,0 +1,23 @@
+int __bits(8) x[10] = {-4, -6, 0, -10, 3, 7, 3, 6, 0, -5};
+unsigned __bits(8) res;
+
+void main()
+{
+int sum1 = 0;
+int sum2 = 0;
+int rev;
+
+for (int i = 0; i < 10; i++)
+{
+if (x[i] > 0)
+{
+sum1 = sum1 + x[i];
+}
+else if (x[i] < 0)
+{
+rev = ~x[i];
+sum2 = sum2 + rev;
+}
+}
+res = sum1 % sum2;
+}

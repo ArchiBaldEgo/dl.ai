@@ -1,0 +1,966 @@
+int __bits(8) mas[10];
+int __bits(8) minval;
+int __bits(8) maxval;
+int __bits(8) sr_ar;
+
+void main() {
+minval = 255;
+maxval = 0;
+
+for (int i = 0; i < 10; i++) {
+if (mas[i] < minval) {
+minval = mas[i];
+}
+if (mas[i] > maxval) {
+maxval = mas[i];
+}
+}
+
+sr_ar = (minval + maxval) / 2;
+}
+
+
+
+------------------------------------------------------------
+
+	int __out __bits(8) result;
+
+void main()
+{
+int __bits(8) x[10];
+int __bits(8) sumPos;
+int __bits(8) sumNeg;
+int __bits(8) i;
+
+sumPos = 0;
+sumNeg = 0;
+
+for (i = 0; i < 10; i = i + 1)
+{
+if (x[i] > 0)
+{
+sumPos = sumPos + x[i];
+}
+else
+{
+if (x[i] < 0)
+{
+sumNeg = sumNeg + (-x[i]);
+}
+}
+}
+
+result = sumPos % sumNeg;
+}
+
+
+------------------------------------------------------------
+
+	int __out __bits(8) result;
+
+void main()
+{
+int __bits(8) A[10];
+int __bits(8) sumPos;
+int __bits(8) sumNeg;
+int __bits(8) i;
+
+sumPos = 0;
+sumNeg = 0;
+
+for (i = 0; i < 10; i = i + 1)
+{
+if (A[i] > 0)
+{
+sumPos = sumPos + A[i];
+}
+else
+{
+if (A[i] < 0)
+{
+sumNeg = sumNeg + (-A[i]);
+}
+}
+}
+
+result = sumPos % sumNeg;
+}
+
+
+------------------------------------------------------------
+
+	int __in __bits(8) x[10];
+
+int __out __bits(8) result;
+
+void main()
+{
+int __bits(8) sumPos;
+int __bits(8) sumNeg;
+int __bits(8) i;
+
+sumPos = 0;
+sumNeg = 0;
+
+for (i = 0; i < 10; i = i + 1)
+{
+if (x[i] > 0)
+{
+sumPos = sumPos + x[i];
+}
+else
+{
+if (x[i] < 0)
+{
+sumNeg = sumNeg + (-x[i]);
+}
+}
+}
+
+result = sumPos % sumNeg;
+}
+
+
+------------------------------------------------------------
+
+	int __in __bits(8) a;
+int __in __bits(8) b;
+
+int __out __bits(8) y;
+
+void main()
+{
+if (a < b) {
+y = 10;
+}
+else {
+y = 5;
+}
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __bits(8) sum_pol;
+int __bits(8) sum_otr;
+int __bits(8) abs;
+int __bits(8) res;
+
+void main() {
+for (int i = 0; i < 10; i++) {
+if (x[i] < 0) {
+abs += -(x[i]);
+}
+}
+for (i = 0; i < 10; i++) {
+if (x[i] > 0) {
+sum_pol += x[i];
+}
+}
+
+res = sum_pol % abs;
+
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __bits(8) sum_pol;
+int __bits(8) sum_otr;
+int __bits(8) abs;
+int __bits(8) res;
+
+void main() {
+for (int i = 0; i < 10; i++) {
+if (x[i] < 0) {
+sum_otr += x[i];
+}
+}
+for (i = 0; i < 10; i++) {
+if (x[i] > 0) {
+sum_pol += x[i];
+}
+}
+if (sum_otr < 0) {
+abs = -sum_otr;
+} else {
+abs = sum_otr;
+}
+if (abs != 0) {
+res = sum_pol % abs;
+} else {
+res = 0;
+}
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __bits(8) sum_pol;
+int __bits(8) sum_otr;
+int __bits(8) abs;
+int __bits(8) res;
+
+void main() {
+sum_pol = 0;
+sum_otr = 0;
+for (int i = 0; i < 10; i++) {
+if (x[i] < 0) sum_otr = sum_otr + x[i];
+if (x[i] > 0) sum_otr = sum_pol + x[i];
+}
+if (sum_otr < 0) abs = sum_otr * -1;
+else abs = sum_otr;
+
+res = sum_pol % abs;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+
+void main(){
+int i;
+int sump=0;
+int sumo=0;
+
+for (i=0; i<10; i++){
+if (x[i]>0) sump=sump+x[i];
+if (x[i]<0) sumo=(sumo+x[i])*(-1);
+}
+y=sump%sumo;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+
+void main(){
+int i;
+int sump=0;
+int sumo=0;
+
+for (i=0; i<10; i++){
+if (x[i]>0) sump=sump+x[i];
+if (x[i]<0) sumo=(sumo+x[i])*(-1);
+}
+y=sump%sumo;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+
+unsigned __out __bits(8)res;
+
+void main(){
+unsigned __bits(8)pol=0;
+unsigned __bits(8)otr=0;
+for(int i=0; i<9; i++){
+if (x[i]>0){
+pol += x[i];
+} else {
+otr -= x[i];
+}
+}
+res = pol%otr;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+
+int __out __bits(8)res;
+
+void main(){
+int __bits(32)pol=0;
+int __bits(32)otr=0;
+for(int i=0; i<9; i++){
+if (x[i]>0){
+pol += x[i];
+} else {
+otr -= x[i];
+}
+}
+res = pol%otr;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+
+int __out __bits(8)res;
+
+void main(){
+int __bits(32)pol=0;
+int __bits(32)otr=0;
+for(int i=0; i<9; i++){
+if (x[i]>0){
+pol += x[i];
+} else {
+otr -= x[i];
+}
+}
+res = pol%otr;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(32) x[10];
+
+int __out __bits(32)res;
+
+void main(){
+int __bits(32)pol=0;
+int __bits(32)otr=0;
+for(int i=0; i<9; i++){
+if (x[i]>0){
+pol += x[i];
+} else {
+otr -= x[i];
+}
+}
+res = pol%otr;
+} 
+
+
+
+
+------------------------------------------------------------
+
+	int __bits(32)x[10];
+
+int __out __bits(32)res;
+
+void main(){
+int __bits(32)pol=0;
+int __bits(32)otr=0;
+for(int i=0; i<9; i++){
+if (x[i]>0){
+pol += x[i];
+} else {
+otr -= x[i];
+}
+}
+res = pol%otr;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(32)x[10];
+
+int __out __bits(32)res;
+
+void main(){
+int __bits(32)pol=0;
+int __bits(32)otr=0;
+for(int i=0; i<9; i++){
+if (x[i]>0){
+pol += x[i];
+} else {
+otr -= x[i];
+}
+}
+res = pol%otr;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+unsigned __bits(8) res;
+
+void main()
+{
+int sum1 = 0;
+int sum2 = 0;
+int rev;
+
+for (int i = 0; i < 10; i++)
+{
+if (x[i] > 0)
+{
+sum1 = sum1 + x[i];
+}
+else if (x[i] < 0)
+{
+rev = ~x[i];
+sum2 = sum2 + rev;
+}
+}
+res = sum1 % sum2;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int __bits(16) sump=0;
+int __bits(16) sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+while (sump>sumn) sump=sump-sumn;
+res=(sump%256);
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+unsigned __bits(8) res;
+
+void main()
+{
+int sum1 = 0;
+int sum2 = 0;
+int rev;
+
+for (int i = 0; i < 10; i++)
+{
+if (x[i] > 0)
+{
+sum1 = sum1 + x[i];
+}
+else if (x[i] < 0)
+{
+rev = ~x[i];
+sum2 = sum2 + rev;
+}
+}
+res = sum1 % sum2;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int __bits(16) sump=0;
+int __bits(16) sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+while (sump>sumn) sump=sump-sumn;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int __bits(16) sump=0;
+int __bits(16) sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+while (sump>sumn) sump-=sumn;
+res=sump;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int sump=0;
+int sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int sump=0;
+int sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+while (sump>sumn) sump-=sumn;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int sump=0;
+int sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+res=(sump%sumn);
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+unsigned __bits(8) res;
+
+void main()
+{
+int sum1 = 0;
+int sum2 = 0;
+int rev;
+
+for (int i = 0; i < 10; i++)
+{
+if (x[i] > 0)
+{
+sum1 = sum1 + x[i];
+}
+else if (x[i] < 0)
+{
+rev = ~x[i];
+sum2 = sum2 + rev;
+}
+}
+res = sum1 % sum2;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10] = {-4, -6, 0, -10, 3, 7, 3, 6, 0, -5};
+unsigned __bits(8) res;
+
+void main()
+{
+int sum1 = 0;
+int sum2 = 0;
+int rev;
+
+for (int i = 0; i < 10; i++)
+{
+if (x[i] > 0)
+{
+sum1 = sum1 + x[i];
+}
+else if (x[i] < 0)
+{
+rev = ~x[i];
+sum2 = sum2 + rev;
+}
+}
+res = sum1 % sum2;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int sump=0;
+int sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int sump=0;
+int sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+res=(sump%sumn);
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int sump=0;
+int sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+res=sump%sumn;
+} 
+
+
+
+
+------------------------------------------------------------
+
+	char str[10];
+unsigned __out __bits(8) res;
+
+void main()
+{
+int sum1 = 0;
+int sum2 = 0;
+for(int i = 0; i < 10; i++){
+if(str[i] > 0) sum1 += str[i];
+else sum2 += str[i];
+}
+sum2 *= (-1);
+res = sum1 % sum2;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+
+unsigned int __out __bits(8) res;
+
+unsigned int abs(unsigned __bits(8) x) {
+if (x < 0) {
+x = -x;
+}
+
+return x;
+}
+
+void main() {
+unsigned int __bits(8) s1 = 0;
+unsigned int __bits(8) s2 = 0;
+for (unsigned int __bits(8) i = 0; i < 10; i++) {
+if (x[i] >= 0) {
+s1 += x[i];
+}
+else {
+s2 += x[i];
+}
+}
+if (s2 != 0) {
+res = s1 % s2;
+}
+else {
+res = 0;
+}
+
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+
+unsigned int __out __bits(8) res;
+
+void abs(unsigned __bits(8) x) {
+if (x < 0) {
+x = -x;
+}
+}
+
+void main() {
+unsigned int __bits(8) s1 = 0;
+unsigned int __bits(8) s2 = 0;
+for (unsigned int __bits(8) i = 0; i < 10; i++) {
+if (x[i] >= 0) {
+s1 += x[i];
+}
+else {
+s2 += x[i];
+}
+}
+if (s2 != 0) {
+res = s1 % s2;
+}
+else {
+res = 0;
+}
+
+}
+
+
+------------------------------------------------------------
+
+	int x[10] = {-4, -6, 0, -10, 3, 7, 3, 6, 0, -5};
+
+int __out __bits(8) res;
+
+int main(){
+int __bits(8) sum1 = 0;
+int __bits(8) sum2 = 0;
+
+for(int i = 0; i < 10; i++){
+if(x[i] > 0){
+sum1 += x[i];
+} else {
+sum2 -= x[i];
+}
+}
+
+res = sum1 % sum2;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) x[10];
+
+int __out __bits(8) res;
+
+void main()
+{
+int __bits(8) i;
+int __bits(32) s1=0;
+int __bits(32) s2=0;
+for (i=0; i<10; i++)
+if (x[i]>=0) s1 += x[i];
+else s2 += -x[i];
+res = s1%s2;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) a[10];
+
+int __out __bits(8) res;
+
+void main()
+{
+int __bits(8) i;
+int __bits(32) s1;
+int __bits(32) s2;
+for (i=0; i<10; i++)
+if (a[i]>=0) s1 += a[i];
+else s2 += -a[i];
+res = s1%s2;
+}
+
+
+------------------------------------------------------------
+
+	int __bits(8) a[10];
+
+int __out __bits(8) res;
+
+void main()
+{
+int __bits(8) i;
+int __bits(32) s1;
+int __bits(32) s2;
+for (i=0; i<10; i++)
+if (a[i]>=0) s1 += a[i];
+else s2 += -a[i];
+res = s1%s2;
+}
+
+
+------------------------------------------------------------
+
+	int __in __bits(80) x;
+int __out __bits(8) res;
+
+void main() {
+int p = 0;
+int n = 0;
+int i;
+
+for (i = 0; i < 10; i++) {
+int e = (x >> (i * 8)) & 0xFF;
+if (e > 0x7F) {
+n += 256 - e;
+} else if (e > 0) {
+p += e;
+}
+}
+
+res = (n == 0) ? 0 : p % n;
+}
+
+
+------------------------------------------------------------
+
+	int __in __bits(8) x;
+int __out __bits(8) res;
+
+static int sum_pos = 0;
+static int sum_abs_neg = 0;
+static int count = 0;
+
+void main() {
+if (count < 10) {
+// +ñ¨ğñğªvòğõü ş¢õ¨õôışù ¤ûõüõıª òõúªş¨ğ
+if (x > 0) {
+sum_pos += x;
+} else if (x < 0) {
+sum_abs_neg += -x; // ¦şôºû¹ şª¨ø¡ğªõû¹ışóş ¢ø¸ûğ
+}
+count++;
+res = 0; // ¦şúğ ıõ şñ¨ğñşªğûø ò¸õ ¤ûõüõıªv, òvòşôøü 0
+} else {
+// +ñ¨ğñşªğûø ò¸õ 10 ¤ûõüõıªşò, òv¢ø¸û õü ¨õ÷ºû¹ªğª
+if (sum_abs_neg == 0) {
+res = 0; // +¸ûø ıõª şª¨ø¡ğªõû¹ıv¿ ¤ûõüõıªşò
+} else {
+res = sum_pos % sum_abs_neg;
+}
+
+// Tñ¨ğ¸vòğõü ¸ş¸ªş ıøõ ôû ¸ûõôº¦•õóş òõúªş¨ğ
+sum_pos = 0;
+sum_abs_neg = 0;
+count = 0;
+}
+}
+
+
+------------------------------------------------------------
+
+	int __in __bits(8) x;
+int __out __bits(8) res;
+
+static int sum_pos = 0;
+static int sum_abs_neg = 0;
+static int count = 0;
+
+void main() {
+if (count < 10) {
+if (x > 0) {
+sum_pos += x;
+} else if (x < 0) {
+sum_abs_neg += -x; // ¦şôºû¹ şª¨ø¡ğªõû¹ışóş ¢ø¸ûğ
+}
+count++;
+res = 0;
+} else {
+if (sum_abs_neg == 0) {
+res = 0;
+} else {
+res = sum_pos % sum_abs_neg;
+}
+// Tñ¨ş¸ ôû ¸ûõôº¦•õóş òõúªş¨ğ
+sum_pos = 0;
+sum_abs_neg = 0;
+count = 0;
+}
+}
+
+
+------------------------------------------------------------
+
+	unsigned char mas[10];
+unsigned char sr_ar;
+
+void main()
+{
+unsigned char min_val = mas[0];
+unsigned char max_val = mas[0];
+int i;
+
+for (i = 1; i < 10; i++) {
+if (mas[i] < min_val) {
+min_val = mas[i];
+}
+if (mas[i] > max_val) {
+max_val = mas[i];
+}
+}
+
+sr_ar = (min_val + max_val) / 2;
+}
+
+
+------------------------------------------------------------
+
+char x [10];
+
+unsigned __out __bits(8) res;
+
+void main(){
+int sum_positive = 0;
+int sum_modulus = 0;
+for (int i = 0; i < 10; i++) {
+if (x[i] > 0) {
+sum_positive += x[i];
+} else if (x[i] < 0) {
+sum_modulus += -x[i]; }
+}
+
+if (sum_modulus != 0) {
+int res = sum_positive % sum_modulus;
+}
+}
+
+
+
+------------------------------------------------------------
+----
+
+int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main() {
+int __bits(16) sum_positive = 0;
+int __bits(16) sum_negative = 0;
+
+for(int i = 0; i < 10; i++) {
+if(x[i] > 0) {
+sum_positive = sum_positive + x[i];
+} else if(x[i] < 0) {
+sum_negative = sum_negative + (-x[i]);
+}
+}
+
+if(sum_negative != 0) {
+res = sum_positive % sum_negative;
+} else {
+res = 0;
+}
+} 

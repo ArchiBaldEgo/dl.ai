@@ -1,0 +1,14 @@
+int __bits(8) x[10];
+int __out __bits(8) res;
+
+void main()
+{
+int __bits(16) sump=0;
+int __bits(16) sumn=0;
+int i;
+for (i=0;i<10;i++)
+if (x[i]>0) sump+=x[i];
+else if (x[i]<0) sumn-=x[i];
+while (sump>sumn) sump-=sumn;
+res=sump;
+}

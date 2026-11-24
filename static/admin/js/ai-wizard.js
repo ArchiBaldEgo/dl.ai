@@ -98,9 +98,8 @@
         en: {
             chat: {
                 "#selectLang": { title: "Page language", text: "This changes the language of the interface: Russian, English, French." },
-                "#select": { title: "Model selection", text: "These are different AI helper models. Click and pick who will answer you." },
+                "#select": { title: "Model selection", text: "These are different AI helper models. Click and pick who will answer you. The list is already ordered by quality — models that solve tasks more accurately and faster are on top. Not sure? Leave it as is: on “Solve the task” and “What’s the error?” the best model for the chosen language is picked automatically." },
                 "#thinkToggleBtn": { title: "The Think button", text: "Visible only for Ollama models. Off — the model answers right away; on — you can first look at its reasoning (the “Thinking” block above the answer)." },
-                "#selectModelSort": { title: "Model sorting", text: "You can show faster or more precise models first." },
                 "#selectType": { title: "Mode", text: "Modes: chat, “Solve the task”, “What's the error?”. Switch through the list." },
                 "#themeToggleBtn": { title: "Light or dark", text: "Click — the page turns dark. Click again — light." },
                 "#userDocsBtn": { title: "The “?” button", text: "This is the user guide. Click if anything is unclear. You can also show these tips again there." },
@@ -116,7 +115,7 @@
             solve: {
                 "#selectType": { title: "Where you are", text: "You are on the “Solve the task” page. Use this list to return to “Chat”." },
                 "#selectLang": { title: "Page language", text: "This changes the interface language." },
-                "#select": { title: "Model selection", text: "The list of model helpers that will solve the task." },
+                "#select": { title: "Model selection", text: "The list of model helpers that will solve the task. The best model for the chosen language is picked automatically." },
                 "#selectProgLng": { title: "Programming language", text: "First choose the language of your code: C or Assembler." },
                 "#selectTheme": { title: "Topic", text: "Pick a topic — it tells the model what the task is about." },
                 "#selectPrompt": { title: "Preprompt", text: "A preprompt is a small hint for the model. The selected one is fine." }
@@ -124,7 +123,7 @@
             find_error: {
                 "#selectType": { title: "Where you are", text: "You are on the “What’s the error?” page. Use the list to return to “Chat” or “Solve the task”." },
                 "#selectLang": { title: "Page language", text: "This changes the interface language." },
-                "#select": { title: "Model selection", text: "Pick the model helper that will check your code." },
+                "#select": { title: "Model selection", text: "Pick the model helper that will check your code. The numbers depend on the language and topic you choose below." },
                 "#taskText": { title: "Task text", text: "Copy the task condition from dl.gsu.by here." },
                 "#codeText": { title: "Code text", text: "And paste the whole program here." }
             },
@@ -147,9 +146,8 @@
         fr: {
             chat: {
                 "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes : Russe, English, Français." },
-                "#select": { title: "Choix du modèle", text: "Voici différents modèles-assistants. Clique et choisis celui qui te répondra." },
+                "#select": { title: "Choix du modèle", text: "Voici différents modèles-assistants. Clique et choisis celui qui te répondra. La liste est déjà triée par qualité — en haut, les modèles qui résolvent les tâches plus précisément et plus vite. Si tu ne sais pas, laisse tel quel : sur « Résoudre la tâche » et « Quelle est l’erreur ? », le meilleur modèle pour la langue choisie est sélectionné automatiquement." },
                 "#thinkToggleBtn": { title: "Le bouton Think", text: "Visible seulement pour les modèles Ollama. Désactivé — le modèle répond tout de suite ; activé — tu peux d’abord voir son raisonnement (le bloc « Réflexions » au-dessus de la réponse)." },
-                "#selectModelSort": { title: "Tri des modèles", text: "Tu peux afficher en premier les modèles plus rapides ou plus précis." },
                 "#selectType": { title: "Mode", text: "Modes : chat, « Résoudre la tâche », « Quelle est l’erreur ? ». On change via la liste." },
                 "#themeToggleBtn": { title: "Clair ou sombre", text: "Clique — la page devient sombre. Clique encore — claire à nouveau." },
                 "#userDocsBtn": { title: "Le bouton « ? »", text: "C’est le guide utilisateur. Clique si quelque chose n’est pas clair. Tu peux aussi réafficher ces astuces ici." },
@@ -165,7 +163,7 @@
             solve: {
                 "#selectType": { title: "Où tu es", text: "Tu es sur la page « Résoudre la tâche ». Par cette liste, tu reviens au « Chat »." },
                 "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes." },
-                "#select": { title: "Choix du modèle", text: "La liste des modèles-assistants qui résoudront la tâche." },
+                "#select": { title: "Choix du modèle", text: "La liste des modèles-assistants qui résoudront la tâche. Le meilleur modèle pour la langue choisie est sélectionné automatiquement." },
                 "#selectProgLng": { title: "Langage de programmation", text: "Choisis d’abord le langage de ton code : C ou Assembleur." },
                 "#selectTheme": { title: "Thème", text: "Choisis un thème — il explique au modèle de quoi parle la tâche." },
                 "#selectPrompt": { title: "Pré-promp", text: "Le pré-prompt est une petite indication pour le modèle. Celle déjà choisie suffit." }
@@ -173,7 +171,7 @@
             find_error: {
                 "#selectType": { title: "Où tu es", text: "Tu es sur la page « Quelle est l’erreur ? ». Par la liste, reviens au « Chat » ou à « Résoudre la tâche »." },
                 "#selectLang": { title: "Langue de la page", text: "C’est ici que change la langue des textes." },
-                "#select": { title: "Choix du modèle", text: "Choisis le modèle-assistant qui vérifiera ton code." },
+                "#select": { title: "Choix du modèle", text: "Choisis le modèle-assistant qui vérifiera ton code. Les chiffres dépendent de la langue et du thème choisis ci-dessous." },
                 "#taskText": { title: "Texte de la tâche", text: "Colle ici l’énoncé de la tâche depuis dl.gsu.by." },
                 "#codeText": { title: "Texte du code", text: "Et colle ici le programme en entier." }
             },
@@ -300,15 +298,14 @@
 
         chat: [
             // Строгий порядок чата (ранг: явный rank сильнее геометрии):
-            // язык → модель → think → сортировка → режим → тема → «?» →
+            // язык → модель → think → режим → тема → «?» →
             // голосовой → «Мои модели» → «Админ-Панель» (по правам) →
             // история → ввод → отправить → очистить.
             // Шагов с common в чате НЕТ: basics_seen не режет чат — тур всегда
             // полный и строгий (ранги).
             { sel: "#selectLang", rank: 10, title: "Язык страницы", text: "Тут меняется язык надписей: Русский, English, Français. Сам текст вопросов и ответов — всегда на том языке, на котором ты пишешь.", pos: "bottom" },
-            { sel: "#select", rank: 11, title: "Выбор модели", text: "Это разные помощники-модели: нажми и выбери, кто будет отвечать. Не знаешь, кого взять — оставь как есть: наверху стоит обычно та, что выбиралась чаще всего.", pos: "bottom" },
+            { sel: "#select", rank: 11, title: "Выбор модели", text: "Это разные помощники-модели: нажми и выбери, кто будет отвечать. Список уже разложен по качеству — сверху модели, которые решают задачи точнее и быстрее. Не знаешь, кого взять — оставь как есть: на страницах «Реши задачу» и «В чём ошибка» лучшая для выбранного языка модель подставляется сама.", pos: "bottom" },
             { sel: "#thinkToggleBtn", rank: 12, skipIfHidden: true, title: "Кнопка Think", text: "Видна только у моделей Ollama. Выключено — модель отвечает сразу; включено — сначала можно посмотреть её рассуждения (блок «Размышления» над ответом).", pos: "bottom" },
-            { sel: "#selectModelSort", rank: 13, title: "Сортировка моделей", text: "Здесь можно переложить список: сначала более быстрые модели или сначала более точные. Вернуть как было — режим «по алфавиту».", pos: "bottom" },
             { sel: "#selectType", rank: 14, title: "Режим", text: "Режимы: чат, «Реши задачу», «В чём ошибка». Через этот список переключаешься между страницами — всё твоё (модель, тема) запомнится.", pos: "bottom" },
             { sel: "#themeToggleBtn", rank: 15, title: "Светлое или тёмное", text: "Нажми — страница станет тёмной. Ещё раз — снова светлой. Как тебе удобнее читать.", pos: "bottom" },
             { sel: "#userDocsBtn", rank: 16, title: "Кнопка «?»", text: "Это полная инструкция — нажми, если что-то непонятно. Она есть на русском, английском и французском (язык как у страницы); если перевод не подгрузился — покажется русская версия. Там же можно снова показать эти подсказки.", pos: "bottom" },
@@ -328,7 +325,7 @@
         solve: [
             { sel: "#selectType", rank: 10, title: "Где ты", text: "Ты на странице «Реши задачу». Через этот список вернёшься в «Чат».", pos: "bottom", common: true },
             { sel: "#selectLang", rank: 11, title: "Язык страницы", text: "Тут меняется язык надписей.", pos: "bottom", common: true },
-            { sel: "#select", rank: 12, title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу. Рядом с именем могут стоять цифры: % решённых задач и среднее время ответа. Смотри на них как на подсказку: они показывают, как модель справляется именно с твоим выбором ниже.", pos: "bottom", common: true },
+            { sel: "#select", rank: 12, title: "Выбор модели", text: "Список моделей — помощников, которые будут решать задачу. Выбери язык программирования ниже — лучшая модель для него подставится сама, а рядом с именами появятся цифры: % решённых задач и среднее время ответа по этому языку. Пока язык не выбран или статистики нет, цифр нет, а выбрана лучшая модель по всем языкам.", pos: "bottom", common: true },
             { sel: "#selectProgLng", rank: 13, title: "Язык программирования", text: "Выбери, на каком языке пишешь код: C или Ассемблер. От выбора зависит всё остальное: какие будут темы, промпты и цифры у моделей выше.", pos: "bottom" },
             { sel: "#selectTheme", rank: 14, title: "Тема", text: "Выбери тему — она объясняет модели, о чём задача. Выбрал тему — цифры у моделей пересчитаются под статистику именно этой темы.", pos: "top" },
             { sel: "#selectPrompt", rank: 15, title: "Промпт", text: "Промпт — маленькая подсказка для модели: как ей отвечать и оформлять код. Обычно подходит тот, что уже выбран.", pos: "top" }
@@ -340,7 +337,7 @@
         find_error: [
             { sel: "#selectType", rank: 10, title: "Где ты", text: "Ты на странице «В чём ошибка». Через список вернёшься в «Чат» или в «Реши задачу».", pos: "bottom", common: true },
             { sel: "#selectLang", rank: 11, title: "Язык страницы", text: "Тут меняется язык надписи.", pos: "bottom", common: true },
-            { sel: "#select", rank: 12, title: "Выбор модели", text: "Выбери помощника-модель, которая проверит код. Рядом с именем могут стоять цифры: % решённых задач и среднее время — считаются по выбранному языку и теме (нет цифр — по такому сочетанию модель ещё не прогонялась).", pos: "bottom", common: true },
+            { sel: "#select", rank: 12, title: "Выбор модели", text: "Выбери помощника-модель, которая проверит код. Язык и тема ниже определяют цифры: % решённых задач и среднее время — по выбранному языку (и теме). Нет цифр — по такому выбору модель ещё не прогонялась; сам выбор модели при этом не меняется.", pos: "bottom", common: true },
             { sel: "#taskText", rank: 13, title: "Текст для задачи", text: "Вставь сюда условие задачи целиком — скопируй его со страницы dl.gsu.by, где задача написана.", pos: "top" },
             { sel: "#codeText", rank: 14, title: "Текст для кода", text: "А ниже вставь свою программу целиком — модель посмотрит её вместе с условием и скажет, где ошибка.", pos: "top" }
         ],

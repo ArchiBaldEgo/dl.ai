@@ -33,6 +33,7 @@ from ..models import (
     AIModelTestResult,
     AIModelTestRun,
     AIRequestLog,
+    AIUserModel,
     AIPinnedBatchRun,
     ExternalDLAccount,
     Task,
@@ -49,6 +50,11 @@ from ..services.msk_time import msk_day_bounds, parse_date
 from ..services.task_registry import (  # DRY: единственное определение — в task_registry
     EXTENSION_TO_LANG,
     dl_task_url,
+)
+from ..services.user_models import (
+    format_model_names,
+    user_model_filter_choices,
+    user_model_labels_for_names,
 )
 from ..services.user_search import flat_user_q, identity_matches
 from .permissions import can_access_arm, can_access_logs, is_staff_or_superuser, logs_scope_is_own_user
@@ -436,14 +442,18 @@ def build_recent_log_rows(request, limit=5):
     }
 
 
-def build_log_table_row(log):
+def build_log_table_row(log, user_model_labels=None):
     """Строка таблицы обычных запросов журнала.
 
     Контракт — ЕДИНЫЙ для журнала (обычный запрос И пакетный прогон в одной
     таблице): набор ключей ``_JOURNAL_ROW_DEFAULTS``. Разметка строки —
     admin/ai/_ai_log_row.html (колонки пакета у обычной строки пустые).
+
+    ``user_model_labels`` — карта ``User_<pk>`` → подпись, собранная один раз
+    на страницу (``build_journal_rows``), чтобы не делать запрос на строку.
     """
     models = list(log.model_names or [])
+    model_display = format_model_names(models, user_model_labels)
     duration_display = (
         str(round(log.duration_seconds)) if log.duration_seconds is not None else "—"
     )
@@ -463,8 +473,8 @@ def build_log_table_row(log):
         # Имена-синонимы прежнего контракта (старые шаблоны/тесты читают их).
         "topic_name": log.topic_name or "—",
         "prompt_name": log.prompt_name or "—",
-        "model_names": ", ".join(models) or "—",
-        "model_display": ", ".join(models) or "—",
+        "model_names": model_display,
+        "model_display": model_display,
         "status": log.status,
         "status_display": log.get_status_display(),
         "status_class": "ok" if log.status == "success" else "err",
@@ -495,6 +505,11 @@ def build_journal_rows(request, logs, batch_contexts=None):
         row["id"]: row
         for row in (build_batch_rows_for_logs(request, batch_logs) if batch_logs else [])
     }
+    # Один запрос на всю страницу: сырые ключи User_<pk> → «Название — ФИО
+    # (личная)». Иначе журнал показывал технический ключ в каждой строке.
+    user_model_labels = user_model_labels_for_names(
+        name for log in logs for name in (log.model_names or [])
+    )
     entries = []
     for log in logs:
         batch = batch_contexts.get(log.pk)
@@ -511,7 +526,7 @@ def build_journal_rows(request, logs, batch_contexts=None):
         else:
             entries.append({
                 "log": log, "batch": None,
-                "row": build_log_table_row(log), "is_batch": False,
+                "row": build_log_table_row(log, user_model_labels), "is_batch": False,
             })
     return entries
 
@@ -728,7 +743,7 @@ def admin_request_log_detail_json_view(request, log_id):
             "source_display": log.get_source_display() or "—",
             "mode_display": log.get_mode_display() or "—",
             "status_display": log.get_status_display(),
-            "model_names": ", ".join(log.model_names or []) or "—",
+            "model_names": format_model_names(log.model_names),
             "tokens": log.tokens,
             "duration_seconds": log.duration_seconds,
             "sent_at": timezone.localtime(log.sent_at).strftime("%d.%m.%Y %H:%M:%S"),
@@ -1016,7 +1031,9 @@ def admin_daily_report_view(request):
     )
 
     students = {}
+    day_model_names = []
     for log in logs.iterator(chunk_size=2000):
+        day_model_names.extend(log.model_names or [])
         key = log.external_user_id or f"local:{log.username or '?'}"
         rec = students.get(key)
         if rec is None:
@@ -1031,6 +1048,10 @@ def admin_daily_report_view(request):
         rec["last"] = log
         rec["requests"].append(log)
 
+    # Карта личных моделей — одна на весь день (отчёт может содержать
+    # сотни запросов, отдельный запрос на строку недопустим).
+    user_model_labels = user_model_labels_for_names(day_model_names)
+
     def _request_row(log):
         return {
             # Ссылка на детальный лог (та же страница, что из журнала запросов).
@@ -1039,7 +1060,7 @@ def admin_daily_report_view(request):
             "mode": log.get_mode_display() or "—",
             "topic": log.topic_name or "—",
             "prompt": log.prompt_name or "—",
-            "model": ", ".join(log.model_names or []) or "—",
+            "model": format_model_names(log.model_names, user_model_labels),
             "status": log.get_status_display() or log.status or "—",
             "status_class": "ok" if log.status == AIRequestLog.STATUS_SUCCESS else "err",
         }
@@ -1153,6 +1174,31 @@ def admin_daily_report_view(request):
     return TemplateResponse(request, "admin/ai/daily_report.html", context)
 
 
+def _model_filter_q(model: str):
+    """Q для фильтра «Модель»: матчим и ключ, и отображаемый title.
+
+    В журнале успешные записи исторически хранят title модели, а ошибочные —
+    ключ (``User_<pk>``/реестровый id). Фильтр по одному значению раньше
+    находил только половину строк; для личных моделей ключ и title вообще
+    не совпадали. Один запрос за title — только для выбранного значения.
+    """
+    query = Q(model_names__contains=[model])
+    title = None
+    if model.startswith("User_") and model[5:].isdigit():
+        title = (
+            AIUserModel.objects.filter(pk=int(model[5:]))
+            .values_list("title", flat=True)
+            .first()
+        )
+    else:
+        info = get_runtime_model_handlers().get(model)
+        if info:
+            title = info.get("title")
+    if title and title != model:
+        query |= Q(model_names__contains=[title])
+    return query
+
+
 def admin_request_logs_view(request):
     # 1. 
     if not can_access_logs(request):
@@ -1173,7 +1219,7 @@ def admin_request_logs_view(request):
     if mode in mode_values:
         qs = qs.filter(mode=mode)
     if model:
-        qs = qs.filter(model_names__contains=[model])
+        qs = qs.filter(_model_filter_q(model))
     if user_q:
         # Универсальный поиск: id (DL-id/логин) и ФИО в любом порядке.
         user_filter = flat_user_q(
@@ -1250,6 +1296,9 @@ def admin_request_logs_view(request):
             {"key": key, "title": info["title"]}
             for key, info in _handlers.items()
         ]
+        # Личные модели не входят в глобальный реестр, но их запросы есть в
+        # журнале — фильтр должен их находить (включая уже выключенные).
+        model_choices.extend(user_model_filter_choices())
         context.update({
             **ai_admin_site.each_context(request),
             "title": "DL.AI: Логи запросов",
@@ -1641,6 +1690,7 @@ def admin_request_log_detail_view(request, log_id):
         **ai_admin_site.each_context(request),
         "title": "DL.AI: Детали запроса",
         "log": log,
+        "model_display": format_model_names(log.model_names),
         "moscow_tz": MOSCOW_TZ,
         # Кнопки паузы/перезапуска прогона в детали журнала.
         "arm_actions": can_access_arm(request),

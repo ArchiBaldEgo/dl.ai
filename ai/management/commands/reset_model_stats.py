@@ -6,8 +6,10 @@
 вызов модели; команда обнуляет накопленное, чтобы средние считались заново
 по новым (честным) замерам пакетных прогонов.
 """
+from django.core.cache import cache
 from django.core.management.base import BaseCommand
 
+from ai.constants import AI_CACHE_KEY_PREFIX
 from ai.models import AIModelStats
 
 
@@ -21,6 +23,10 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         deleted, _ = AIModelStats.objects.all().delete()
+        # Селектор моделей получает статистику из закэшированного каталога
+        # (ai:available_models, 30 с) — без сброса он ещё полминуты отдавал бы
+        # старые средние/порядок.
+        cache.delete(f"{AI_CACHE_KEY_PREFIX}:available_models")
         self.stdout.write(self.style.SUCCESS(
             "AIModelStats сброшена: удалено %d строк. Средние «≈N сек» и "
             "%% решённых считаются заново по следующим пакетным прогонам." % deleted

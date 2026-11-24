@@ -1,0 +1,11 @@
+Количество каждой ошибки
+
+error_1: 6
+error_2: 4
+error_3: 4
+error_16: 9
+error_17: 4
+error_20: 1
+error_21: 22
+error_22: 6
+

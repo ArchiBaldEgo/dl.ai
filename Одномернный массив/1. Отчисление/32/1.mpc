@@ -1,0 +1,11 @@
+char b[20];
+
+unsigned __out __bits(8) kol;
+
+void main(){
+unsigned count = 0;
+for (int i = 0; i < 20; i++){
+if(b[i] < 4) count++;
+}
+kol = count;
+}

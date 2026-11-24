@@ -66,7 +66,9 @@ def _dynamic_page_doc_permissions(request):
     _ai_tool_defs и есть нав). Строки БД подгоняются под реестр
     (get_or_create + освежение подписи) — миграции для новых страниц не
     нужны; вложенные действия страниц (9-й элемент кортежа) синхронизируются
-    той же петлёй. Возврат: {key: {"label": str, "children": [(key, label)]}}.
+    той же петлёй. 9-й элемент опционален: страница без действий может его
+    не передавать — потребитель не должен падать на коротком кортеже.
+    Возврат: {key: {"label": str, "children": [(key, label)]}}.
     Ключи БД, не попавшие в реестр (устаревшие страницы/доки), НЕ
     показываются — выдача была бы бессмысленна.
     """
@@ -83,7 +85,8 @@ def _dynamic_page_doc_permissions(request):
             resolve(url)
         except Resolver404:
             continue  # маршрута в urls.py нет — ключ не выдаётся
-        available[key] = {"label": tool[1], "children": list(tool[8] or ())}
+        children = list(tool[8]) if len(tool) > 8 and tool[8] else []
+        available[key] = {"label": tool[1], "children": children}
 
     # Стоковые таблицы ModelAdmin'ов: ключ ACCESS_KEY на классе
     # (ai/admin/models.py::_StaffOnlyAdminMixin) — своей страницы в наве

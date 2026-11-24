@@ -1,0 +1,18 @@
+int __bits(8) x[10];
+int __bits(8) sum_pol;
+int __bits(8) sum_otr;
+int __bits(8) abs;
+int __bits(8) res;
+
+void main() {
+sum_pol = 0;
+sum_otr = 0;
+for (int i = 0; i < 10; i++) {
+if (x[i] < 0) sum_otr = sum_otr + x[i];
+if (x[i] > 0) sum_otr = sum_pol + x[i];
+}
+if (sum_otr < 0) abs = sum_otr * -1;
+else abs = sum_otr;
+
+res = sum_pol % abs;
+}

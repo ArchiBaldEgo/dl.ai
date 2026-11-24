@@ -20,8 +20,16 @@ def view(request: HttpRequest) -> TemplateResponse:
     if request.method == "POST":
         action = request.POST.get("action")
         if action == "delete":
-            UserToEmailDictionary.objects.filter(pk=request.POST.get("pk")).delete()
-            messages.success(request, "Запись удалена.")
+            try:
+                pk = int(request.POST.get("pk") or "")
+            except (TypeError, ValueError):
+                messages.error(request, "Некорректная запись.")
+                return redirect(request.path)
+            deleted, _ = UserToEmailDictionary.objects.filter(pk=pk).delete()
+            if deleted:
+                messages.success(request, "Запись удалена.")
+            else:
+                messages.error(request, "Запись не найдена.")
             return redirect(request.path)
 
         form = UserToEmailForm(request.POST)

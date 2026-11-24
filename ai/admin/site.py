@@ -597,7 +597,7 @@ class AIAdminSite(admin.AdminSite):
             # (он управляет правами групп, включая собственную).
             ("Система", "Группы доступа", "AiAccessGroups", "/ai/admin/ai-groups/", show_groups, "⛭", "Группы доступа: права страниц, действия, состав", "page.groups", ()),
             
-            ("Система", "Emails", "AiEmails", emails.full_url(), emails.can_access(request), "@", emails.DESCRIPTION, emails.PAGE)
+            ("Система", "Emails", "AiEmails", emails.full_url(), emails.can_access(request), "@", emails.DESCRIPTION, emails.PAGE, ()),
         ]
 
     @staticmethod

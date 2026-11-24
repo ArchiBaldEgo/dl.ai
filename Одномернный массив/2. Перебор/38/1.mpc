@@ -1,0 +1,31 @@
+int __in __bits(8) x;
+int __out __bits(8) res;
+
+static int sum_pos = 0;
+static int sum_abs_neg = 0;
+static int count = 0;
+
+void main() {
+if (count < 10) {
+// +ñ¨ğñğªvòğõü ş¢õ¨õôışù ¤ûõüõıª òõúªş¨ğ
+if (x > 0) {
+sum_pos += x;
+} else if (x < 0) {
+sum_abs_neg += -x; // ¦şôºû¹ şª¨ø¡ğªõû¹ışóş ¢ø¸ûğ
+}
+count++;
+res = 0; // ¦şúğ ıõ şñ¨ğñşªğûø ò¸õ ¤ûõüõıªv, òvòşôøü 0
+} else {
+// +ñ¨ğñşªğûø ò¸õ 10 ¤ûõüõıªşò, òv¢ø¸û õü ¨õ÷ºû¹ªğª
+if (sum_abs_neg == 0) {
+res = 0; // +¸ûø ıõª şª¨ø¡ğªõû¹ıv¿ ¤ûõüõıªşò
+} else {
+res = sum_pos % sum_abs_neg;
+}
+
+// Tñ¨ğ¸vòğõü ¸ş¸ªş ıøõ ôû ¸ûõôº¦•õóş òõúªş¨ğ
+sum_pos = 0;
+sum_abs_neg = 0;
+count = 0;
+}
+}

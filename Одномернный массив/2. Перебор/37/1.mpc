@@ -1,0 +1,19 @@
+int __in __bits(80) x;
+int __out __bits(8) res;
+
+void main() {
+int p = 0;
+int n = 0;
+int i;
+
+for (i = 0; i < 10; i++) {
+int e = (x >> (i * 8)) & 0xFF;
+if (e > 0x7F) {
+n += 256 - e;
+} else if (e > 0) {
+p += e;
+}
+}
+
+res = (n == 0) ? 0 : p % n;
+}

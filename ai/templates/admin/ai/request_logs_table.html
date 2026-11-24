@@ -30,7 +30,7 @@ _ai_log_detail.html), пакетный прогон — admin/ai/_ai_batch_row.h
             {% include "admin/ai/_ai_batch_detail.html" with row=entry.row %}
           {% else %}
             {% include "admin/ai/_ai_log_row.html" with row=entry.row %}
-            {% include "admin/ai/_ai_log_detail.html" with log=entry.log %}
+            {% include "admin/ai/_ai_log_detail.html" with log=entry.log model_display=entry.row.model_display %}
           {% endif %}
         {% endfor %}
         {% endtimezone %}

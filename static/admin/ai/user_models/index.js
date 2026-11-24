@@ -3,9 +3,10 @@
 // ai/_user_models_panel.html), адреса create/delete/access/search — в
 // data-атрибутах контейнера (у страниц разные).
 //
-// Доступ: чекбокс «Доступна ВСЕМ» (по умолчанию ВЫКЛ + предупреждение) и
-// адресная выдача — поиск по DL-id/ФИО, несколько получателей, чипы с ×.
-// Суперюзерская таблица «Все модели» управляет ТОЛЬКО доступом: адреса,
+// Доступ: чекбокс «Запросить доступ для всех» (по умолчанию ВЫКЛ +
+// предупреждение; публикацию одобряет суперюзер) и адресная выдача — поиск
+// по DL-id/ФИО, несколько получателей, чипы с ×. Суперюзерская таблица
+// «Все модели» управляет адресным доступом и модерацией заявок: адреса,
 // ключи и настройки чужих моделей на страницу не попадают.
 //
 // Тексты — из json_script «ai-um-i18n» (все три языка): подписи
@@ -336,8 +337,6 @@
                 chipsBox: document.getElementById('ai-um-access-chips'),
                 emptyBox: document.getElementById('ai-um-access-empty'),
                 hintBox: document.getElementById('ai-um-access-hint'),
-                publicCheckbox: document.getElementById('ai-um-access-public'),
-                warningBox: document.getElementById('ai-um-access-public-warning'),
                 searchUrl: searchUrl,
                 tr: tr,
             });
@@ -354,7 +353,6 @@
                 setAllMessage(tr('msgSaving', 'Сохраняем…'), '');
                 post(accessUrl, {
                     id: Number(accessModelId),
-                    is_public: document.getElementById('ai-um-access-public').checked,
                     shared_with: accessEditor.getIds(),
                 }).then(function () {
                     setAllMessage(tr('msgAccessSaved', 'Доступ сохранён.'), 'ok');
@@ -371,9 +369,15 @@
         // безопасна и там (перерисовка по текущему языку).
         function applyAccessCell(cell) {
             var isPublic = cell.getAttribute('data-public') === '1';
+            var isPending = cell.getAttribute('data-pending') === '1';
+            var isRejected = cell.getAttribute('data-rejected') === '1';
             var grants = Number(cell.getAttribute('data-grants') || 0);
             if (isPublic) {
                 cell.textContent = tr('accessPublic', 'всем');
+            } else if (isPending) {
+                cell.textContent = tr('accessPending', 'на модерации');
+            } else if (isRejected) {
+                cell.textContent = tr('accessRejected', 'отклонено');
             } else if (grants > 0) {
                 cell.textContent = grants + ' ' + tr('accessUnit', 'польз.');
             } else {
@@ -407,7 +411,8 @@
             }
             // Заголовки суперюзерской таблицы (отдельный набор).
             var allHeaders = document.querySelectorAll('#ai-um-all-models thead th');
-            var allKeys = ['colTitle', 'colOwner', 'colAccess', 'colState', 'colManage'];
+            var allKeys = ['colTitle', 'colOwner', 'colProvider', 'colModelId',
+                'colAccess', 'colState', 'colManage'];
             for (var ah = 0; ah < allHeaders.length && ah < allKeys.length; ah++) {
                 allHeaders[ah].textContent = tr(allKeys[ah], allHeaders[ah].textContent);
             }
@@ -424,34 +429,38 @@
             for (var ab = 0; ab < accessBtns.length; ab++) {
                 accessBtns[ab].textContent = tr('btnAccess', 'Настроить доступ');
             }
+            var approveBtns = document.querySelectorAll('.ai-um-moderate[data-decision="approve"]');
+            for (var ap = 0; ap < approveBtns.length; ap++) {
+                approveBtns[ap].textContent = tr('btnApprove', 'Одобрить');
+            }
+            var rejectBtns = document.querySelectorAll('.ai-um-moderate[data-decision="reject"]');
+            for (var rj = 0; rj < rejectBtns.length; rj++) {
+                rejectBtns[rj].textContent = tr('btnReject', 'Отклонить');
+            }
+            var revokeBtns = document.querySelectorAll('.ai-um-moderate[data-decision="revoke"]');
+            for (var rv = 0; rv < revokeBtns.length; rv++) {
+                revokeBtns[rv].textContent = tr('btnRevoke', 'Снять с публикации');
+            }
             var accessCells = document.querySelectorAll('.ai-um-access');
             for (var ac = 0; ac < accessCells.length; ac++) {
                 applyAccessCell(accessCells[ac]);
             }
-            var keyCells = document.querySelectorAll('#ai-um-table tbody tr td:nth-child(5)');
+            var keyCells = document.querySelectorAll('.ai-um-key');
             for (var k = 0; k < keyCells.length; k++) {
                 var cell = keyCells[k];
                 var hasKey = cell.getAttribute('data-has-key') === '1';
                 cell.textContent = hasKey ? tr('keySet', 'задан') : tr('keyNone', 'нет');
             }
-            var stateCells = document.querySelectorAll('#ai-um-table tbody tr td:nth-child(6)');
+            var stateCells = document.querySelectorAll('.ai-um-state');
             for (var s = 0; s < stateCells.length; s++) {
                 var scell = stateCells[s];
                 var isActive = scell.getAttribute('data-active') === '1';
                 scell.textContent = isActive ? tr('stateOn', 'активна') : tr('stateOff', 'выключена');
             }
-            var allStateCells = document.querySelectorAll('#ai-um-all-models tbody tr td:nth-child(4)');
-            for (var as = 0; as < allStateCells.length; as++) {
-                var acell = allStateCells[as];
-                var active = acell.getAttribute('data-active') === '1';
-                acell.textContent = active ? tr('stateOn', 'активна') : tr('stateOff', 'выключена');
-            }
             var emptyCell = document.querySelector('.ai-um-empty');
             if (emptyCell) emptyCell.textContent = tr('empty', 'У вас пока нет своих моделей.');
             var publicLabel = document.getElementById('ai-um-public-label');
-            if (publicLabel) publicLabel.textContent = tr('checkPublic', 'Доступна ВСЕМ');
-            var accessPublicLabel = document.getElementById('ai-um-access-public-label');
-            if (accessPublicLabel) accessPublicLabel.textContent = tr('checkPublic', 'Доступна ВСЕМ');
+            if (publicLabel) publicLabel.textContent = tr('checkPublic', 'Запросить доступ для всех');
             var publicWarnings = document.querySelectorAll('.ai-um-public-warning');
             for (var w = 0; w < publicWarnings.length; w++) {
                 publicWarnings[w].textContent = tr('publicWarning', '');
@@ -516,7 +525,7 @@
                 supports_vision: form.supports_vision.checked,
                 supports_think: form.supports_think.checked,
                 is_active: form.is_active.checked,
-                is_public: form.is_public.checked,
+                public_request: form.elements.public_request.checked,
                 shared_with: editor.getIds(),
             };
             post(createUrl, payload)
@@ -552,7 +561,7 @@
                 form.supports_think.checked = !!row.supports_think;
                 form.is_active.checked = !!row.is_active;
                 editor.setGrants(row.grants || []);
-                editor.setPublic(!!row.is_public);
+                editor.setPublic(!!row.is_public || !!row.public_requested);
                 applyTexts();
                 cancelBtn.hidden = false;
                 setMessage('', '');
@@ -584,10 +593,25 @@
                 var panelTitleName = document.getElementById('ai-um-access-panel-title');
                 if (panelTitleName) panelTitleName.textContent = model.title || '';
                 accessEditor.setGrants(model.grants || []);
-                accessEditor.setPublic(!!model.is_public);
                 setAllMessage('', '');
                 accessPanel.hidden = false;
                 accessPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                return;
+            }
+
+            if (target.classList.contains('ai-um-moderate')) {
+                var moderatedId = target.getAttribute('data-id');
+                var decision = target.getAttribute('data-decision');
+                if (!moderatedId || !decision) return;
+                setAllMessage(tr('msgSaving', 'Сохраняем…'), '');
+                post(accessUrl, {
+                    id: Number(moderatedId),
+                    is_public: decision === 'approve',
+                }).then(function () {
+                    window.location.reload();
+                }).catch(function (err) {
+                    setAllMessage(err.message || tr('errAccessSave', 'Не удалось сохранить доступ'), 'err');
+                });
             }
         });
 

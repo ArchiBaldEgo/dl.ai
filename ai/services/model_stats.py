@@ -11,13 +11,12 @@ Semantics агрегации совпадают с ``arm_runner._per_bucket``: �
 (model_key, язык, тема) и ВСЕГДА языковую (model_key, язык, тема NULL); темы
 нет → только языковая; языка нет → пара не пишется (не пачкает скоупы).
 Строки (NULL, NULL) — легаси-глобальный скоуп: новые приращения в него не
-пишутся, его читает только model_health.get_available_model_options (сортировка
-селектора моделей для старых кук); API при неуказанном языке вместо него
-отдаёт АГРЕГАТ по всем scoped-строкам модели (общие данные по всем темам
-и языкам).
+пишутся, и его больше никто не читает (reset_model_stats удаляет). Глобальный
+агрегат (без языка) — это только ЯЗЫКОВЫЕ scoped-строки модели: строки тем —
+их зеркала, и их суммирование удвоило бы пары с темой.
 
-Потребители — ``model_health.get_available_model_options`` (легаси-строки
-только для сортировки селектора моделей) и API ``/ai/api/model-stats/``
+Потребители — ``model_health.get_available_model_options`` (глобальный агрегат
+для порядка и цифр селектора моделей) и API ``/ai/api/model-stats/``
 (скоуп язык/тема для «Реши задачу»/«В чём ошибка»).
 """
 
@@ -126,26 +125,37 @@ def _stats(duration_sum, duration_count, solved_count, total_count):
     }
 
 
-def get_legacy_stats_map(model_keys):
-    """Данные легаси-глобального скоупа (NULL, NULL). Читает ТОЛЬКО
-    model_health.get_available_model_options — сортировка селектора моделей
-    чата: скоуп заморожен (новые приращения пишутся в язык/тему), а данные
-    нужны сортировке как историческая база. Клиентский API этот скоуп не
-    читает — общие данные без скоупа это агрегат scoped-строк
-    (get_model_stats_map с language_id=None).
+def quality_scores(stats_map):
+    """``{model_key: score|None}`` — смесь скорости и точности, 0..1.
+
+    ``score = 0.5 * (1 - avg/max_avg) + 0.5 * (pct/100)``; учитываются только
+    имеющиеся показатели. ``None`` — данных нет (модель уходит в конец списка).
+    ``max_avg`` нормируется по переданному набору — та же формула, что в
+    ``ai-common.js::sortModelOptionsByStats`` (единый смысл порядка на сервере
+    и в клиенте).
     """
-    keys = [k for k in model_keys if k]
-    if not keys:
-        return {}
-    stats_map = {}
-    qs = AIModelStats.objects.filter(
-        model_key__in=keys, programming_language__isnull=True, topic__isnull=True,
+    max_avg = max(
+        (
+            s.get("avg_seconds")
+            for s in stats_map.values()
+            if s and s.get("avg_seconds") is not None
+        ),
+        default=0.0,
     )
-    for row in qs:
-        stats_map[row.model_key] = _stats(
-            row.duration_sum, row.duration_count, row.solved_count, row.total_count,
-        )
-    return stats_map
+    scores = {}
+    for key, stats in stats_map.items():
+        avg = stats.get("avg_seconds") if stats else None
+        pct = stats.get("percent_solved") if stats else None
+        if avg is None and pct is None:
+            scores[key] = None
+            continue
+        score = 0.0
+        if avg is not None and max_avg > 0:
+            score += 0.5 * (1.0 - avg / max_avg)
+        if pct is not None:
+            score += 0.5 * (pct / 100.0)
+        scores[key] = score
+    return scores
 
 
 def get_model_stats_map(model_keys, language_id=None, topic_id=None):
@@ -154,9 +164,11 @@ def get_model_stats_map(model_keys, language_id=None, topic_id=None):
     Читается РОВНО один скоуп — строки разных скоупов нельзя смешивать в ключе
     ``model_key``: язык+тема → точная тема-строка; язык без темы → языковые
     строки (тема NULL, «общие данные по всем темам данного языка»); оба None
-    → ОБЩИЕ данные по всем темам и всем языкам — scoped-строки модели
-    СУММИРУЮТСЯ (взвешенно по счётчикам: время по duration_sum/счёту,
-    точность по solved/total). Легаси-глобальные строки (NULL, NULL) при
+    → ОБЩИЕ данные по всем темам и всем языкам — ЯЗЫКОВЫЕ строки модели
+    суммируются (взвешенно по счётчикам: время по duration_sum/счёту,
+    точность по solved/total). Строки тем в глобальный агрегат НЕ входят:
+    каждая пара с темой пишет и строку темы, и языковую — суммирование обеих
+    удвоило бы такие пары. Легаси-глобальные строки (NULL, NULL) при
     агрегации не участвуют. Модели без накопленной статистики в словаре
     отсутствуют.
     """
@@ -165,12 +177,17 @@ def get_model_stats_map(model_keys, language_id=None, topic_id=None):
         return {}
 
     if language_id is None:
-        # Оба None → общие данные по ВСЕМ темам и языкам: суммируем
-        # scoped-строки модели (SQL-агрегат; легаси-строки (NULL, NULL)
-        # отфильтрованы — их приращения уже давно не пишутся).
+        # Оба None → общие данные по ВСЕМ темам и языкам: суммируем ТОЛЬКО
+        # языковые строки (topic NULL) — ровно одно приращение на пару.
+        # Строки тем — зеркала (см. record_batch_solve_stats), их суммирование
+        # дало бы двойной счёт; легаси-строки (NULL, NULL) тоже отфильтрованы.
         grouped = (
             AIModelStats.objects
-            .filter(model_key__in=keys, programming_language__isnull=False)
+            .filter(
+                model_key__in=keys,
+                programming_language__isnull=False,
+                topic__isnull=True,
+            )
             .values("model_key")
             .annotate(
                 d_sum=Sum("duration_sum"),

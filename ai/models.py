@@ -1007,22 +1007,12 @@ class AIAppSettings(models.Model):
     """
     is_enabled = models.BooleanField(default=True, verbose_name="Включено")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
-    # Дата-отсечка для счётчика «фаворитов» (топ-2 моделей по частоте использования).
-    # Успешные AIRequestLog старше этой даты не учитываются при ранжировании,
-    # что даёт разовый сброс фаворитов для всех пользователей (нет записей новее
-    # epoch → строгий алфавит) без удаления логов; новые запросы снова набирают
-    # топ-2. См. ai/views.py::_get_user_top_model_keys и management-команду
-    # reset_favorites_epoch.
-    favorites_epoch = models.DateTimeField(
-        null=True, blank=True, default=timezone.now,
-        verbose_name="Дата отсечки фаворитов",
-    )
     class Meta:
         verbose_name = "Настройки ИИ-приложения"
         verbose_name_plural = "Настройки ИИ-приложения"
 
-    # Кэш «одиночных» настроек: get_solo() зовётся на каждый рендер страницы,
-    # на подключение WebSocket и при ранжировании фаворитов. 30 с — достаточно,
+    # Кэш «одиночных» настроек: get_solo() зовётся на каждый рендер страницы и
+    # на подключение WebSocket. 30 с — достаточно,
     # чтобы снять повторные SELECT'ы, и мало, чтобы рассинхрон с админкой был
     # заметен; save()/delete() сбрасывают ключ немедленно.
     CACHE_KEY = "ai:app_settings:solo"
@@ -1242,9 +1232,9 @@ class AIRequestLog(models.Model):
                 OpClass(Upper("external_user_id"), "gin_trgm_ops"),
                 name="ai_log_extid_trgm_idx",
             ),
-            # Топ-модели пользователя (ai/views.py::_get_user_top_model_keys):
-            # status='success' + user + срез по sent_at + ORDER BY -sent_at
-            # LIMIT 200. Без составного индекса — скан всей истории юзера.
+            # Журнал запросов: срез по пользователю/статусу с порядком по sent_at
+            # (ai/admin/request_logs.py). Без составного индекса — скан всей
+            # истории пользователя.
             models.Index(
                 fields=["user", "status", "sent_at"],
                 name="ai_log_user_status_sent_idx",
@@ -2034,9 +2024,11 @@ class AIUserModel(models.Model):
     endpoint). По умолчанию модель доступна ТОЛЬКО владельцу: чужие
     пользователи её не видят (селектор моделей), не могут вызвать (проверка
     доступа в ai/services/user_models.py) и не могут отредактировать.
-    Владелец может открыть доступ адресно (``shared_with``) или всем
-    пользователям сразу (``is_public``) — но только на пользовательских
-    страницах, не в ARM.
+    Владелец может открыть доступ адресно (``shared_with``) сразу, а для
+    доступа ВСЕМ (``is_public``) сначала создаёт заявку
+    (``public_requested``): публикацию подтверждает суперпользователь
+    (``public_reviewed_by``/``public_reviewed_at``). Только на
+    пользовательских страницах, не в ARM.
 
     Безопасность:
     - ``base_url`` — только https, без приватных/локальных адресов (SSRF-защита
@@ -2094,7 +2086,29 @@ class AIUserModel(models.Model):
         default=False,
         verbose_name="Доступна всем",
         help_text="Видна и доступна всем пользователям на страницах чата, "
-                  "«Реши задачу» и «В чём ошибка?» (в ARM не попадает).",
+                  "«Реши задачу» и «В чём ошибка?» (в ARM не попадает). "
+                  "Включается только после одобрения суперпользователем.",
+    )
+    # Заявка владельца «открыть всем». Пока она не одобрена, is_public
+    # остаётся False: pending-модель не видна никому, кроме владельца,
+    # получателей адресного доступа и суперюзера в таблице «Все модели».
+    public_requested = models.BooleanField(
+        default=False,
+        db_index=True,
+        verbose_name="Запрошен доступ для всех",
+    )
+    public_reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        verbose_name="Кто рассмотрел заявку",
+    )
+    public_reviewed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Когда рассмотрена заявка",
     )
     shared_with = models.ManyToManyField(
         settings.AUTH_USER_MODEL,

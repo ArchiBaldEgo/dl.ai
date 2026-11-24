@@ -143,7 +143,7 @@ button:hover {
    правил в decide_task.css / find_error.css (одинаковая специфичность,
    ai_theme.css подключён последним). */
 .line-panel select,
-#select, #selectType, #selectModelSort, #selectLang {
+#select, #selectType, #selectLang {
     height: 36px;
     box-sizing: border-box;
     font-family: inherit;
@@ -156,7 +156,7 @@ button:hover {
     color: var(--text-primary, #333);
 }
 
-#select, #selectType, #selectModelSort {
+#select, #selectType {
     flex: 1 1 60px;
     min-width: 60px;
     max-width: 180px;
