@@ -122,10 +122,16 @@
           })
           .join(' ');
 
+        // Тариф (админка): «Платная»/«Бесплатная» — не уходит в селектор.
+        const billingCell = row.billing_label
+          ? `<span class="billing billing-${escapeHtml(row.billing || '')}">${escapeHtml(row.billing_label)}</span>`
+          : '—';
+
         tr.innerHTML = [
           `<td><div>${escapeHtml(row.title)}</div><div class="quiet">${escapeHtml(row.key)}</div></td>`,
           `<td>${statusBadge}</td>`,
           `<td class="cap-cell">${capCell}</td>`,
+          `<td>${billingCell}</td>`,
           `<td>${row.last_http_code !== null && row.last_http_code !== undefined ? escapeHtml(String(row.last_http_code)) : '-'}</td>`,
           `<td>${escapeHtml(row.last_http_code_label || '—')}</td>`,
           `<td>${windowDateCell}</td>`,

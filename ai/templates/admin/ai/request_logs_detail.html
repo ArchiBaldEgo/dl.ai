@@ -68,7 +68,7 @@
         {{ log.prompt_name|default:"—" }}
       {% endif %}
     </div>
-    <div><strong>Модель:</strong> {{ log.model_names|join:", "|default:"—" }}</div>
+    <div><strong>Модель:</strong> {{ model_display|default:"—" }}</div>
     <div><strong>Режим:</strong> {{ log.get_mode_display|default:"—" }}</div>
     <div><strong>Время ответа:</strong> {% if log.duration_seconds %}{{ log.duration_seconds|human_duration }}{% else %}—{% endif %}</div>
   </div>

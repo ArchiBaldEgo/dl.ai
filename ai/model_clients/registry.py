@@ -31,15 +31,20 @@ _VISION_REASONING = {"text": True, "vision": True, "reasoning": True}
 #: который реально реализует возможность.
 IMPLEMENTED_CAPABILITIES = {"text": True, "vision": True, "reasoning": True}
 
-# Модель по умолчанию для селектора на страницах AI: предвыбирается, когда у
-# пользователя нет своего топ-1 фаворита (см. views._render_ai_page).
+# Модель по умолчанию для селектора на страницах AI: используется только как
+# фолбэк, когда статистики нет вовсе (см. views._build_model_selector).
 DEFAULT_MODEL_KEY = "Ollama_Gemma_4_Cloud"
 
-# Префиксы ключей «экспериментальных» моделей (сейчас — OpenRouter): в чате они
-# видны, но отдельной группой В САМОМ НИЗУ селектора и никогда не поднимаются
-# фаворитами (см. views._render_ai_page / views._get_user_top_model_keys);
-# в /arm/solve/ их нет (model_health.ARM_SOLVE_MODEL_PREFIXES).
-EXPERIMENTAL_MODEL_PREFIXES = ("OR_",)
+#: Провайдер (хвост ``handler.__module__``) → тариф для админской страницы
+#: «Состояние моделей». Наружу (селектор моделей, ARM) НЕ отдаётся.
+_PROVIDER_BILLING: Dict[str, str] = {
+    "web_deepseek": "free",
+    "web_kimi": "free",
+    "openrouter": "free",
+    "groq": "free",
+    "ollama": "paid",
+    "sambanova": "paid",
+}
 
 
 _MODELS: Dict[str, Dict[str, object]] = {
@@ -304,6 +309,17 @@ if getattr(settings, "AI_ENABLE_SAMBANOVA", False):
 _DEFAULT_CAPABILITIES = _TEXT_ONLY
 
 
+def provider_module(handler) -> str:
+    """Хвост ``handler.__module__`` ('ai.model_clients.ollama' → 'ollama').
+
+    Единственный владелец правила «провайдер по модулю обработчика»: им
+    пользуются и потолок генерации (ai/model_clients/__init__.py), и тариф
+    (``ModelRegistry.billing``).
+    """
+    module = getattr(handler, "__module__", "") or ""
+    return module.rsplit(".", 1)[-1]
+
+
 class ModelRegistry:
     """Реестр AI-моделей: сопоставляет ключ → {title, handler, capabilities}."""
 
@@ -371,6 +387,27 @@ class ModelRegistry:
                 if key_name in overrides:
                     implemented[key_name] = bool(overrides[key_name])
         return implemented
+
+    def billing(self, key: str) -> str:
+        """Тариф модели: ``"free"`` / ``"paid"`` / ``""`` (неизвестен).
+
+        Провайдер определяется по хвосту ``handler.__module__`` — то же
+        правило — ``provider_module`` (см. также ``ai/model_clients/__init__.py``);
+        для чужих/устаревших реестров — запасной матчинг по префиксу ключа.
+        Используется ТОЛЬКО страницей «Состояние моделей».
+        """
+        info = self._models.get(key)
+        if info is None:
+            return ""
+        handler = info.get("handler")
+        billing = _PROVIDER_BILLING.get(provider_module(handler))
+        if billing:
+            return billing
+        if key.startswith("Ollama_"):
+            return "paid"
+        if key.startswith(("Web_", "OR_", "Groq_")):
+            return "free"
+        return ""
 
     def register(self, key: str, title: str, handler: Handler, capabilities: dict | None = None) -> None:
         self._models[key] = {

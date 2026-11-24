@@ -2,7 +2,20 @@
 
 from urllib.parse import unquote
 
+from django.http import HttpResponseForbidden, JsonResponse
+from django.views.csrf import csrf_failure
+
+from .constants import CHECK_AI_ADMIN_PATH
 from .external_auth import get_external_session_cookie_name
+
+
+def csrf_failure_view(request, reason=""):
+    if request.path_info == CHECK_AI_ADMIN_PATH:
+        message = "Не удалось подтвердить отправку формы. Откройте страницу заново и повторите проверку."
+        if request.GET.get("format") == "json":
+            return JsonResponse({"error": message}, status=403)
+        return HttpResponseForbidden(message)
+    return csrf_failure(request, reason=reason)
 
 
 def safe_relative_url(candidate, fallback):

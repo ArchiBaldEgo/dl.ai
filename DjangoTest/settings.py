@@ -203,6 +203,7 @@ CSRF_COOKIE_HTTPONLY = _env_bool("CSRF_COOKIE_HTTPONLY", default=True)
 CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE", "Lax")
 SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
 CSRF_USE_SESSIONS = _env_bool("CSRF_USE_SESSIONS", default=False)
+CSRF_FAILURE_VIEW = "ai.http_utils.csrf_failure_view"
 
 # If you terminate TLS at a reverse proxy (nginx, etc.), enable this.
 if _env_bool("USE_X_FORWARDED_PROTO", default=not DEBUG):

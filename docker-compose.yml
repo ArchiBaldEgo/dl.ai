@@ -45,6 +45,9 @@ services:
       - "${AI_WEB_PORT:-8000}:8000"
     env_file:
       - .env
+    environment:
+      # Берём ключ из терминала или из корневого .env.
+      PANGRAM_API_KEY: "${PANGRAM_API_KEY:-}"
     # NOTE: WebDeepseek/.env no longer exists — all bot vars (PORT, MAX_BOT_COUNT,
     # BOT_USERNAME/BOT_PASSWORD, BOT_PROXY*, etc.) now live in the root .env.
     # Do NOT remap PUPPETEER_PROXY_* -> BOT_PROXY* via `environment:` here.

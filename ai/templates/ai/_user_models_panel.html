@@ -55,10 +55,10 @@
       <label class="ai-um-check"><input type="checkbox" name="supports_vision"> {{ t.checkVision }}</label>
       <label class="ai-um-check"><input type="checkbox" name="supports_think"> {{ t.checkThink }}</label>
       <label class="ai-um-check"><input type="checkbox" name="is_active" checked> {{ t.checkActive }}</label>
-      <label class="ai-um-check"><input type="checkbox" name="is_public" id="ai-um-public"> <span id="ai-um-public-label">{{ t.checkPublic }}</span></label>
+      <label class="ai-um-check"><input type="checkbox" name="public_request" id="ai-um-public"> <span id="ai-um-public-label">{{ t.checkPublic }}</span></label>
     </div>
-    {# Предупреждение о публичности: показывается только при включённом  #}
-    {# чекбоксе (по умолчанию он ВЫКЛ — модель остаётся приватной).     #}
+    {# Заявка на публикацию: показывается при включённом чекбоксе. Модель  #}
+    {# станет публичной только после одобрения суперпользователем.        #}
     <div class="ai-um-public-warning" id="ai-um-public-warning" hidden>{{ t.publicWarning }}</div>
     {# Адресный доступ: поиск получателя по DL-id/ФИО + чипы выбранных. #}
     <div class="ai-um-share">
@@ -98,9 +98,9 @@
           <td>{{ model.provider_label }}</td>
           <td class="ai-um-mono">{{ model.model_id }}</td>
           <td class="ai-um-mono ai-um-url">{{ model.base_url|default:"—" }}</td>
-          <td data-has-key="{% if model.has_key %}1{% else %}0{% endif %}">{% if model.has_key %}{{ t.keySet }}{% else %}{{ t.keyNone }}{% endif %}</td>
-          <td data-active="{% if model.is_active %}1{% else %}0{% endif %}">{% if model.is_active %}{{ t.stateOn }}{% else %}{{ t.stateOff }}{% endif %}</td>
-          <td class="ai-um-access" data-public="{% if model.is_public %}1{% else %}0{% endif %}" data-grants="{{ model.grants|length }}">{% if model.is_public %}{{ t.accessPublic }}{% elif model.grants %}{{ model.grants|length }} {{ t.accessUnit }}{% else %}{{ t.accessPrivate }}{% endif %}</td>
+          <td class="ai-um-key" data-has-key="{% if model.has_key %}1{% else %}0{% endif %}">{% if model.has_key %}{{ t.keySet }}{% else %}{{ t.keyNone }}{% endif %}</td>
+          <td class="ai-um-state" data-active="{% if model.is_active %}1{% else %}0{% endif %}">{% if model.is_active %}{{ t.stateOn }}{% else %}{{ t.stateOff }}{% endif %}</td>
+          <td class="ai-um-access" data-public="{% if model.is_public %}1{% else %}0{% endif %}" data-pending="{% if model.public_requested %}1{% else %}0{% endif %}" data-rejected="{% if model.public_status == 'rejected' %}1{% else %}0{% endif %}" data-grants="{{ model.grants|length }}">{% if model.is_public %}{{ t.accessPublic }}{% elif model.public_requested %}{{ t.accessPending }}{% elif model.public_status == 'rejected' %}{{ t.accessRejected }}{% elif model.grants %}{{ model.grants|length }} {{ t.accessUnit }}{% else %}{{ t.accessPrivate }}{% endif %}</td>
           <td class="ai-um-actions-cell">
             <button type="button" class="button ai-um-edit" data-id="{{ model.id }}">{{ t.btnEdit }}</button>
             <button type="button" class="button ai-um-delete" data-id="{{ model.id }}">{{ t.btnDelete }}</button>
@@ -122,6 +122,8 @@
         <tr>
           <th scope="col">{{ t.colTitle }}</th>
           <th scope="col">{{ t.colOwner }}</th>
+          <th scope="col">{{ t.colProvider }}</th>
+          <th scope="col">{{ t.colModelId }}</th>
           <th scope="col">{{ t.colAccess }}</th>
           <th scope="col">{{ t.colState }}</th>
           <th scope="col">{{ t.colManage }}</th>
@@ -132,10 +134,18 @@
           <tr data-id="{{ model.id }}">
             <td class="ai-um-title">{{ model.title }}</td>
             <td>{{ model.owner_display }}{% if model.owner_dl_id %} <span class="ai-um-mono">[{{ model.owner_dl_id }}]</span>{% endif %}</td>
-            <td class="ai-um-access" data-public="{% if model.is_public %}1{% else %}0{% endif %}" data-grants="{{ model.grants|length }}">{% if model.is_public %}{{ t.accessPublic }}{% elif model.grants %}{{ model.grants|length }} {{ t.accessUnit }}{% else %}{{ t.accessPrivate }}{% endif %}</td>
-            <td data-active="{% if model.is_active %}1{% else %}0{% endif %}">{% if model.is_active %}{{ t.stateOn }}{% else %}{{ t.stateOff }}{% endif %}</td>
+            <td>{{ model.provider_label }}</td>
+            <td class="ai-um-mono">{{ model.model_id }}</td>
+            <td class="ai-um-access" data-public="{% if model.is_public %}1{% else %}0{% endif %}" data-pending="{% if model.public_requested %}1{% else %}0{% endif %}" data-rejected="{% if model.public_status == 'rejected' %}1{% else %}0{% endif %}" data-grants="{{ model.grants|length }}">{% if model.is_public %}{{ t.accessPublic }}{% elif model.public_requested %}{{ t.accessPending }}{% elif model.public_status == 'rejected' %}{{ t.accessRejected }}{% elif model.grants %}{{ model.grants|length }} {{ t.accessUnit }}{% else %}{{ t.accessPrivate }}{% endif %}</td>
+            <td class="ai-um-state" data-active="{% if model.is_active %}1{% else %}0{% endif %}">{% if model.is_active %}{{ t.stateOn }}{% else %}{{ t.stateOff }}{% endif %}</td>
             <td class="ai-um-actions-cell">
               <button type="button" class="button ai-um-access-edit" data-id="{{ model.id }}">{{ t.btnAccess }}</button>
+              {% if model.public_requested %}
+                <button type="button" class="button ai-um-moderate" data-id="{{ model.id }}" data-decision="approve">{{ t.btnApprove }}</button>
+                <button type="button" class="button ai-um-moderate" data-id="{{ model.id }}" data-decision="reject">{{ t.btnReject }}</button>
+              {% elif model.is_public %}
+                <button type="button" class="button ai-um-moderate" data-id="{{ model.id }}" data-decision="revoke">{{ t.btnRevoke }}</button>
+              {% endif %}
             </td>
           </tr>
         {% endfor %}
@@ -144,8 +154,6 @@
 
     <div class="ai-um-access-panel" id="ai-um-access-panel" hidden>
       <h4>{{ t.accessPanelTitle }}: <span id="ai-um-access-panel-title"></span></h4>
-      <label class="ai-um-check"><input type="checkbox" id="ai-um-access-public"> <span id="ai-um-access-public-label">{{ t.checkPublic }}</span></label>
-      <div class="ai-um-public-warning" id="ai-um-access-public-warning" hidden>{{ t.publicWarning }}</div>
       <div class="ai-um-share">
         <input type="search" id="ai-um-access-search" autocomplete="off"
                placeholder="{{ t.shareSearchPlaceholder }}">

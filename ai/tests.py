@@ -2106,12 +2106,17 @@ class TopPanelIncludeTests(SimpleTestCase):
         panel = self._render(
             "chat",
             available_models=[model],
-            other_models=[model],
             default_model_key=model["key"],
         )
         self.assertIn('id="selectLang"', panel)
         self.assertIn('id="selectType"', panel)
         self.assertIn('data-vision="1"', panel)
+        self.assertNotIn('id="selectModelSort"', panel)
+        # Каталог — плоский: групп «Часто используемые»/«Все модели»/
+        # «Экспериментальные» в селекторе нет.
+        self.assertNotIn('data-ai-group="favorites"', panel)
+        self.assertNotIn('data-ai-group="all"', panel)
+        self.assertNotIn('data-ai-group="experimental"', panel)
 
     def test_user_model_option_uses_supports_vision(self):
         panel = self._render(
@@ -2257,7 +2262,7 @@ class AutorecoveryTests(TestCase):
 
 
 class ArmSolveModelOptionsTests(TestCase):
-    """get_arm_solve_model_options: весь каталог Web_/Ollama_ + пометки доступности.
+    """get_arm_solve_model_options: весь каталог Web_/Ollama_/OR_ + пометки доступности.
 
     Список чекбоксов на /arm/solve/ больше не режется по is_available: модель
     без строки AIModelAvailability за текущее окно (только что добавленная,
@@ -2326,10 +2331,15 @@ class ArmSolveModelOptionsTests(TestCase):
             self.assertEqual(opt["title"], registry.title(opt["key"]))
             self.assertEqual(opt["capabilities"], registry.capabilities(opt["key"]))
 
-    def test_only_web_and_ollama_keys_present(self):
+    def test_only_web_ollama_openrouter_keys_present(self):
         from ai.model_health import ARM_SOLVE_MODEL_PREFIXES
+        self.assertEqual(ARM_SOLVE_MODEL_PREFIXES, ("Web_", "Ollama_", "OR_"))
         for opt in self._options():
             self.assertTrue(opt["key"].startswith(ARM_SOLVE_MODEL_PREFIXES))
+        keys = [opt["key"] for opt in self._options()]
+        # OpenRouter допущен (ради статистики), Groq — нет.
+        self.assertTrue(any(k.startswith("OR_") for k in keys))
+        self.assertFalse(any(k.startswith("Groq_") for k in keys))
 
 
 class ModelHealthGuardTests(TestCase):
@@ -5901,234 +5911,189 @@ class TaskRegistryTests(TestCase):
 
 # ===================================================================
 
-class ModelSortingTests(SimpleTestCase):
-    """Tests for _get_user_top_model_keys and model sorting in _render_ai_page."""
+class ModelSelectorBuildTests(SimpleTestCase):
+    """Плоский селектор моделей: сортировка по качеству и дефолт по языку.
+
+    «Часто используемые»/«Все модели»/«Экспериментальные» удалены: каталог —
+    один список, OR_* равноправны (могут быть дефолтом).
+    """
+
+    @staticmethod
+    def _model(key, title, avg=None, pct=None):
+        item = {"key": key, "title": title, "capabilities": {}}
+        if avg is not None:
+            item["avg_seconds"] = avg
+        if pct is not None:
+            item["percent_solved"] = pct
+        return item
+
+    def test_empty_list(self):
+        from ai.views import _build_model_selector
+        self.assertEqual(_build_model_selector([], None), ([], ""))
+
+    def test_global_sort_by_quality_and_default(self):
+        """score = 0.5*(1-avg/max_avg)+0.5*(pct/100); без данных — в конце."""
+        from ai.views import _build_model_selector
+        models = [
+            self._model("Slow", "Slow", avg=8.0, pct=100.0),
+            self._model("Fast", "Fast", avg=1.0, pct=100.0),
+            self._model("Mixed", "Mixed", avg=4.0, pct=0.0),
+            self._model("Zeta", "Zeta"),
+            self._model("Alpha", "Alpha"),
+        ]
+        flat, default_key = _build_model_selector(models, None)
+        self.assertEqual(
+            [m["key"] for m in flat], ["Fast", "Slow", "Mixed", "Alpha", "Zeta"])
+        self.assertEqual(default_key, "Fast")
+        self.assertIsNot(flat, models, "входной список не мутируется")
+
+    def test_tie_break_by_title(self):
+        from ai.views import _build_model_selector
+        models = [
+            self._model("K2", "Beta", avg=1.0, pct=50.0),
+            self._model("K1", "Alpha", avg=1.0, pct=50.0),
+        ]
+        flat, _ = _build_model_selector(models, None)
+        self.assertEqual([m["key"] for m in flat], ["K1", "K2"])
+
+    def test_language_stats_override_global(self):
+        """Есть статистика языка — порядок и дефолт считаются по ней."""
+        from ai.views import _build_model_selector
+        models = [
+            self._model("Fast", "Fast", avg=1.0, pct=100.0),
+            self._model("Slow", "Slow", avg=8.0, pct=0.0),
+            self._model("Zeta", "Zeta"),
+        ]
+        scoped = {
+            "Slow": {"avg_seconds": 1.0, "percent_solved": 100.0},
+            "Fast": {"avg_seconds": 9.0, "percent_solved": 0.0},
+        }
+        with patch("ai.services.model_stats.get_model_stats_map", return_value=scoped):
+            flat, default_key = _build_model_selector(models, 2)
+        self.assertEqual([m["key"] for m in flat], ["Slow", "Fast", "Zeta"])
+        self.assertEqual(default_key, "Slow")
+
+    def test_empty_language_stats_fall_back_to_global(self):
+        """Нет данных по языку → глобальный агрегат (цифры клиент скроет)."""
+        from ai.views import _build_model_selector
+        models = [
+            self._model("Fast", "Fast", avg=1.0, pct=100.0),
+            self._model("Slow", "Slow", avg=8.0, pct=0.0),
+        ]
+        empty = {
+            "Fast": {"avg_seconds": None, "percent_solved": None},
+            "Slow": {"avg_seconds": None, "percent_solved": None},
+        }
+        with patch("ai.services.model_stats.get_model_stats_map", return_value=empty):
+            flat, default_key = _build_model_selector(models, 7)
+        self.assertEqual([m["key"] for m in flat], ["Fast", "Slow"])
+        self.assertEqual(default_key, "Fast")
+
+    def test_openrouter_can_be_default(self):
+        """OR_* — обычная модель каталога (не «экспериментальная»)."""
+        from ai.views import _build_model_selector
+        models = [
+            self._model("Web_DeepSeek", "Web DeepSeek", avg=8.0, pct=0.0),
+            self._model("OR_Best", "OR Best", avg=1.0, pct=100.0),
+        ]
+        flat, default_key = _build_model_selector(models, None)
+        self.assertEqual([m["key"] for m in flat], ["OR_Best", "Web_DeepSeek"])
+        self.assertEqual(default_key, "OR_Best")
+
+    def test_default_fallback_without_any_stats(self):
+        """Без статистики вовсе — DEFAULT_MODEL_KEY, иначе первая по алфавиту."""
+        from ai.views import _build_model_selector
+        from ai.model_clients.registry import DEFAULT_MODEL_KEY
+        models = [
+            self._model("Aaa", "Aaa"),
+            self._model(DEFAULT_MODEL_KEY, "Gemma"),
+            self._model("Zzz", "Zzz"),
+        ]
+        flat, default_key = _build_model_selector(models, None)
+        self.assertEqual(default_key, DEFAULT_MODEL_KEY)
+        # Без данных порядок — по алфавиту; дефолт задаёт только selected.
+        self.assertEqual([m["key"] for m in flat],
+                         ["Aaa", DEFAULT_MODEL_KEY, "Zzz"])
+        flat, default_key = _build_model_selector(models[:1] + models[2:], None)
+        self.assertEqual(default_key, "Aaa")
+        self.assertEqual(flat[0]["key"], "Aaa")
+
+    # --- _render_ai_page: язык из ai_state применяется только на задачных
+    # страницах (чат и «Мои AI-модели» — глобальный дефолт).
 
     def setUp(self):
         self.factory = RequestFactory()
-        # SimpleTestCase запрещает запросы к БД, а _render_ai_page проверяет
-        # доступ к админке (ключи групп лежат в БД). Здесь проверяется только
-        # сортировка моделей — право доступа подменяем.
-        patcher = patch("ai.views.can_access_admin", return_value=False)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        dev_patcher = patch("ai.views.is_prompt_developer_user", return_value=False)
-        dev_patcher.start()
-        self.addCleanup(dev_patcher.stop)
+        for target, kwargs in (
+            ("ai.views.can_access_admin", {"return_value": False}),
+            ("ai.views.is_prompt_developer_user", {"return_value": False}),
+            ("ai.views._has_page_access", {"return_value": True}),
+            ("ai.views.AIAppSettings.get_solo",
+             {"return_value": SimpleNamespace(is_enabled=True)}),
+        ):
+            patcher = patch(target, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-    def _make_user(self, pk=1):
-        return SimpleNamespace(
-            is_authenticated=True,
-            is_active=True,
-            username="sort-user",
-            pk=pk,
+    def _render_with_cookie(self, active_page, template, prog_lng=None):
+        from ai.views import _render_ai_page
+        models_data = [
+            self._model("Fast", "Fast", avg=1.0, pct=100.0),
+            self._model("Slow", "Slow", avg=8.0, pct=0.0),
+        ]
+        request = self.factory.get("/ai/chat/")
+        request.user = SimpleNamespace(
+            is_authenticated=True, is_active=True, username="sort-user", pk=1,
         )
-
-    def test_top_model_keys_returns_empty_for_anonymous(self):
-        """No user pk → empty list, no exception."""
-        from ai.views import _get_user_top_model_keys
-        request = self.factory.get("/ai/chat/")
-        request.user = SimpleNamespace(is_authenticated=False, pk=None)
-        result = _get_user_top_model_keys(request, limit=2)
-        self.assertEqual(result, [])
-
-    def test_top_model_keys_returns_empty_for_string_user(self):
-        """String user (no pk) → empty list."""
-        from ai.views import _get_user_top_model_keys
-        request = self.factory.get("/ai/chat/")
-        request.user = "some-session-string"
-        result = _get_user_top_model_keys(request, limit=2)
-        self.assertEqual(result, [])
-
-    def test_top_model_keys_returns_empty_when_no_logs(self):
-        """User with no AIRequestLog entries → empty list."""
-        from ai.views import _get_user_top_model_keys
-        request = self.factory.get("/ai/chat/")
-        request.user = self._make_user(pk=999)
-        result = _get_user_top_model_keys(request, limit=2)
-        self.assertEqual(result, [])
-
-    def test_user_top_models_come_first(self):
-        """User's top-2 models first, then the rest strictly alphabetical (no web priority)."""
-        from ai.views import _render_ai_page
-        models_data = [
-            {"key": "DeepSeek_V3_1", "title": "DeepSeek V3.1", "capabilities": {}},
-            {"key": "Groq_Llama_3_3_70B", "title": "Groq Llama 3.3 70B", "capabilities": {}},
-            {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
-            {"key": "Gemma_3_12b_it", "title": "Gemma 3 12b IT", "capabilities": {}},
-            {"key": "MiniMax_M2_5", "title": "MiniMax M2.5", "capabilities": {}},
-        ]
-        request = self.factory.get("/ai/chat/")
-        request.user = self._make_user(pk=1)
         request.session = {}
         request.user_info = {"userId": "sort-user"}
-        request.COOKIES = {"userId": "sort-user"}
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Groq_Llama_3_3_70B", "DeepSeek_V3_1"]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
-            _render_ai_page(request, "ai/chat.html")
-        context = mock_render.call_args[0][2]
-        keys = [m["key"] for m in context["available_models"]]
-        self.assertEqual(keys[0], "Groq_Llama_3_3_70B")
-        self.assertEqual(keys[1], "DeepSeek_V3_1")
-        self.assertEqual(keys[2], "Gemma_3_12b_it")
-        self.assertEqual(keys[3], "MiniMax_M2_5")
-        self.assertEqual(keys[4], "Web_DeepSeek")
+        cookies = {"userId": "sort-user"}
+        if prog_lng is not None:
+            import json
+            cookies["ai_state"] = json.dumps({"progLng": str(prog_lng)})
+        request.COOKIES = cookies
+        scoped = {
+            "Slow": {"avg_seconds": 1.0, "percent_solved": 100.0},
+            "Fast": {"avg_seconds": 9.0, "percent_solved": 0.0},
+        }
+        with patch("ai.views.get_available_model_options", return_value=models_data), \
+                patch("ai.services.model_stats.get_model_stats_map",
+                      return_value=scoped) as stats_mock, \
+                patch("ai.views.render",
+                      return_value=HttpResponse("ok")) as render_mock:
+            _render_ai_page(request, template, active_page=active_page)
+        return render_mock.call_args[0][2], stats_mock
 
-    def test_no_user_top_models_strictly_alphabetical(self):
-        """Without user top models: everything strictly alphabetical by title."""
-        from ai.views import _render_ai_page
-        models_data = [
-            {"key": "DeepSeek_V3_1", "title": "DeepSeek V3.1", "capabilities": {}},
-            {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
-            {"key": "Web_DeepSeek_Thinking", "title": "Web DeepSeek Thinking", "capabilities": {}},
-            {"key": "Gemma_3_12b_it", "title": "Gemma 3 12b IT", "capabilities": {}},
-            {"key": "MiniMax_M2_5", "title": "MiniMax M2.5", "capabilities": {}},
-        ]
-        request = self.factory.get("/ai/chat/")
-        request.user = self._make_user(pk=1)
-        request.session = {}
-        request.user_info = {"userId": "sort-user"}
-        request.COOKIES = {"userId": "sort-user"}
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=[]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
-            _render_ai_page(request, "ai/chat.html")
-        context = mock_render.call_args[0][2]
-        keys = [m["key"] for m in context["available_models"]]
-        self.assertEqual(keys[0], "DeepSeek_V3_1")
-        self.assertEqual(keys[1], "Gemma_3_12b_it")
-        self.assertEqual(keys[2], "MiniMax_M2_5")
-        self.assertEqual(keys[3], "Web_DeepSeek")
-        self.assertEqual(keys[4], "Web_DeepSeek_Thinking")
+    def test_chat_ignores_saved_language_for_default(self):
+        context, stats_mock = self._render_with_cookie(
+            "chat", "ai/chat.html", prog_lng=5)
+        stats_mock.assert_not_called()
+        self.assertEqual(context["default_model_key"], "Fast")
+        self.assertNotIn("favorite_models", context)
+        self.assertNotIn("other_models", context)
+        self.assertNotIn("experimental_models", context)
 
-    def test_user_top_first_no_duplicates(self):
-        """User's top models first, the rest strictly alphabetical, no duplicate keys."""
-        from ai.views import _render_ai_page
-        models_data = [
-            {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
-            {"key": "Web_DeepSeek_Thinking", "title": "Web DeepSeek Thinking", "capabilities": {}},
-            {"key": "Gemma_3_12b_it", "title": "Gemma 3 12b IT", "capabilities": {}},
-            {"key": "MiniMax_M2_5", "title": "MiniMax M2.5", "capabilities": {}},
-        ]
-        request = self.factory.get("/ai/chat/")
-        request.user = self._make_user(pk=1)
-        request.session = {}
-        request.user_info = {"userId": "sort-user"}
-        request.COOKIES = {"userId": "sort-user"}
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Web_DeepSeek", "Gemma_3_12b_it"]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
-            _render_ai_page(request, "ai/chat.html")
-        context = mock_render.call_args[0][2]
-        keys = [m["key"] for m in context["available_models"]]
-        self.assertEqual(keys[0], "Web_DeepSeek")
-        self.assertEqual(keys[1], "Gemma_3_12b_it")
-        self.assertEqual(keys[2], "MiniMax_M2_5")
-        self.assertEqual(keys[3], "Web_DeepSeek_Thinking")
-        self.assertEqual(len(keys), len(set(keys)))
-
-    def test_default_model_first_without_user_top(self):
-        """Без фаворита модель по умолчанию — первая, ключ уходит в шаблон (selected)."""
-        from ai.views import _render_ai_page
-        from ai.model_clients.registry import DEFAULT_MODEL_KEY
-        models_data = [
-            {"key": "Aaa_Model", "title": "Aaa Model", "capabilities": {}},
-            {"key": DEFAULT_MODEL_KEY, "title": "Ollama Gemma 4", "capabilities": {}},
-            {"key": "Zzz_Model", "title": "Zzz Model", "capabilities": {}},
-        ]
-        request = self.factory.get("/ai/chat/")
-        request.user = self._make_user(pk=1)
-        request.session = {}
-        request.user_info = {"userId": "sort-user"}
-        request.COOKIES = {"userId": "sort-user"}
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=[]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
-            _render_ai_page(request, "ai/chat.html")
-        context = mock_render.call_args[0][2]
-        keys = [m["key"] for m in context["available_models"]]
-        self.assertEqual(keys[0], DEFAULT_MODEL_KEY)
-        self.assertEqual(keys[1], "Aaa_Model")
-        self.assertEqual(keys[2], "Zzz_Model")
-        self.assertEqual(context["default_model_key"], DEFAULT_MODEL_KEY)
-
-    def test_user_top_beats_default_model(self):
-        """Фаворит сильнее дефолта: default_model_key пуст, дефолт остаётся в списке."""
-        from ai.views import _render_ai_page
-        from ai.model_clients.registry import DEFAULT_MODEL_KEY
-        models_data = [
-            {"key": "Aaa_Model", "title": "Aaa Model", "capabilities": {}},
-            {"key": DEFAULT_MODEL_KEY, "title": "Ollama Gemma 4", "capabilities": {}},
-            {"key": "Zzz_Model", "title": "Zzz Model", "capabilities": {}},
-        ]
-        request = self.factory.get("/ai/chat/")
-        request.user = self._make_user(pk=1)
-        request.session = {}
-        request.user_info = {"userId": "sort-user"}
-        request.COOKIES = {"userId": "sort-user"}
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["Zzz_Model"]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
-            _render_ai_page(request, "ai/chat.html")
-        context = mock_render.call_args[0][2]
-        keys = [m["key"] for m in context["available_models"]]
-        self.assertEqual(keys[0], "Zzz_Model")
-        self.assertIn(DEFAULT_MODEL_KEY, keys)
-        self.assertEqual(context["default_model_key"], "")
-
-    def test_experimental_models_bottom_separate_group(self):
-        """OpenRouter (OR_*) — отдельная группа experimental_models в самом низу:
-        не попадает в «Все модели», в фавориты и в deфолт."""
-        from ai.views import _render_ai_page
-        models_data = [
-            {"key": "OR_Nemotron_Nano_12B_VL", "title": "OR Nemotron Nano 12B VL", "capabilities": {}},
-            {"key": "Web_DeepSeek", "title": "Web DeepSeek", "capabilities": {}},
-            {"key": "OR_Nemotron_Nano_9B", "title": "OR Nemotron Nano 9B", "capabilities": {}},
-            {"key": "Gemma_3_12b_it", "title": "Gemma 3 12b IT", "capabilities": {}},
-            {"key": "OR_Nemotron_Ultra_550B", "title": "OR Nemotron Ultra 550B", "capabilities": {}},
-        ]
-        request = self.factory.get("/ai/chat/")
-        request.user = self._make_user(pk=1)
-        request.session = {}
-        request.user_info = {"userId": "sort-user"}
-        request.COOKIES = {"userId": "sort-user"}
-        # Даже если OR-модель — топ-1 пользователя, она не должна вылезти на верх.
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=models_data),              patch("ai.views._get_user_top_model_keys", return_value=["OR_Nemotron_Ultra_550B"]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
-            _render_ai_page(request, "ai/chat.html")
-        context = mock_render.call_args[0][2]
-        flat_keys = [m["key"] for m in context["available_models"]]
-        # user_top — OR-модель, но она НЕ становится фаворитом: Experimental-
-        # модели всегда в самом низу (плоский список тоже их держит в конце).
+    def test_solve_uses_saved_language_stats_for_default(self):
+        context, stats_mock = self._render_with_cookie(
+            "solve", "ai/decide-task.html", prog_lng=5)
+        stats_mock.assert_called_once()
+        self.assertEqual(context["default_model_key"], "Slow")
         self.assertEqual(
-            flat_keys[-3:],
-            ["OR_Nemotron_Nano_12B_VL", "OR_Nemotron_Nano_9B", "OR_Nemotron_Ultra_550B"],
-        )
-        self.assertEqual(
-            [m["key"] for m in context["experimental_models"]],
-            ["OR_Nemotron_Nano_12B_VL", "OR_Nemotron_Nano_9B", "OR_Nemotron_Ultra_550B"],
-            "Experimental-модели — по алфавиту внизу",
-        )
-        self.assertNotIn("OR_Nemotron_Ultra_550B", [m["key"] for m in context["favorite_models"]])
-        exp_keys = {m["key"] for m in context["experimental_models"]}
-        for m in context["other_models"]:
-            self.assertNotIn(m["key"], exp_keys)
-        for m in context["favorite_models"]:
-            self.assertNotIn(m["key"], exp_keys)
-        for m in context["other_models"]:
-            self.assertNotEqual(m["key"], "OR_Nemotron_Nano_12B_VL")
+            [m["key"] for m in context["available_models"]], ["Slow", "Fast"])
+
+    def test_find_error_uses_saved_language_stats_for_default(self):
+        context, stats_mock = self._render_with_cookie(
+            "find_error", "ai/find-error.html", prog_lng="7")
+        stats_mock.assert_called_once()
+        self.assertEqual(context["default_model_key"], "Slow")
 
     def test_selector_context_separates_user_model_options_from_panel_rows(self):
         """base_chat.html читает ``user_models_options``: строки таблицы панели
         (ключ ``user_models``) не должны попадать в optgroup — у них нет
         ``key``, и option рендерился с пустым value."""
-        from ai.views import _render_ai_page
-        request = self.factory.get("/ai/chat/")
-        request.user = self._make_user(pk=1)
-        request.session = {}
-        request.user_info = {"userId": "sort-user"}
-        request.COOKIES = {"userId": "sort-user"}
-        with patch("ai.views._has_page_access", return_value=True),              patch("ai.views.AIAppSettings.get_solo", return_value=SimpleNamespace(is_enabled=True)),              patch("ai.views.get_available_model_options", return_value=[]),              patch("ai.views._get_user_top_model_keys", return_value=[]),              patch("ai.views.render", return_value=HttpResponse("ok")) as mock_render:
-            _render_ai_page(request, "ai/chat.html")
-        context = mock_render.call_args[0][2]
+        context, _ = self._render_with_cookie("chat", "ai/chat.html")
         self.assertIn("user_models_options", context)
         self.assertNotIn("user_models", context)
 
-
-
-# ===================================================================
-# Tests for problem-data API (languages, topics, prompts)
-# ===================================================================
 
 class ProblemDataApiTests(TestCase):
     """Verify that get_problem_data returns correct data for selection."""
@@ -6224,217 +6189,6 @@ class ProblemDataApiTests(TestCase):
         modes = {p["prompt_name"]: p["mode"] for p in data["prompts"]}
         self.assertEqual(modes["Solve it"], "solve")
         self.assertEqual(modes["Find bug"], "find_error")
-
-
-# ===================================================================
-# Tests for _get_user_top_model_keys with real AIRequestLog data
-# ===================================================================
-
-class UserTopModelKeysTests(TestCase):
-    """Test _get_user_top_model_keys with real AIRequestLog records."""
-
-    def setUp(self):
-        from django.core.cache import cache
-        # LocMem-кеш не откатывается между тестами с TestCase, а несколько тестов
-        # ниже используют одного user_id=42 с разным набором логов — без очистки
-        # кеш _get_user_top_model_keys возвращал бы результат предыдущего теста.
-        cache.clear()
-        self.factory = RequestFactory()
-        self.user = get_user_model().objects.create_user(
-            username="freq_user", password="test-pass", pk=42,
-        )
-        # Считаем всю историю: сбрасываем дату-отсечку фаворитов, чтобы
-        # созданные ниже логи (sent_at ≈ now) не отфильтровывались epoch-фильтром
-        # в _get_user_top_model_keys (по умолчанию favorites_epoch = now).
-        from ai.models import AIAppSettings
-        settings = AIAppSettings.get_solo()
-        settings.favorites_epoch = None
-        settings.save(update_fields=["favorites_epoch"])
-
-    def _make_request(self, user=None):
-        request = self.factory.get("/ai/chat/")
-        request.user = user or self.user
-        request.session = {}
-        return request
-
-    def _make_log(self, model_names, status="success"):
-        AIRequestLog.objects.create(
-            user=self.user,
-            username=self.user.username,
-            external_user_id="42",
-            user_full_name="Freq User",
-            client_id="client-1",
-            source=AIRequestLog.SOURCE_WEBSOCKET,
-            mode=AIRequestLog.MODE_CHAT,
-            sent_at=timezone.now(),
-            model_names=model_names,
-            message="test",
-            status=status,
-        )
-
-    def test_experimental_models_excluded_from_user_top(self):
-        """OR_*-модели в логах не становятся фаворитами: считаем только обычные."""
-        from ai.model_clients.registry import EXPERIMENTAL_MODEL_PREFIXES
-
-        from ai.views import _get_user_top_model_keys
-
-        self._make_log(["OR_Nemotron_Nano_9B"])
-        self._make_log(["OR_Nemotron_Nano_9B"])
-        self._make_log(["Web_DeepSeek"])
-
-        result = _get_user_top_model_keys(self._make_request(), limit=2)
-        for key in result:
-            self.assertFalse(key.startswith(EXPERIMENTAL_MODEL_PREFIXES))
-        self.assertIn("Web_DeepSeek", result)
-
-    def test_top_model_keys_read_keys_directly(self):
-        """model_names в логах содержит КЛЮЧИ (consumers.py пишет key) — фаворит
-        должен вычисляться и без title_to_key-транзита."""
-        from ai.views import _get_user_top_model_keys
-
-        self._make_log(["Web_Kimi"])
-        self._make_log(["Web_Kimi"])
-        self._make_log(["Web_DeepSeek"])
-
-        result = _get_user_top_model_keys(self._make_request(), limit=2)
-        self.assertEqual(result[0], "Web_Kimi")
-
-    def test_returns_most_frequent_models(self):
-        """The most frequently used models should be returned in order."""
-        from ai.views import _get_user_top_model_keys
-        from ai.model_clients import registry
-
-        # Get actual model titles from registry
-        all_keys = list(registry.keys())
-        if len(all_keys) < 3:
-            self.skipTest("Need at least 3 models in registry")
-        key_a = all_keys[0]
-        key_b = all_keys[1]
-        key_c = all_keys[2]
-        title_a = registry.title(key_a)
-        title_b = registry.title(key_b)
-        title_c = registry.title(key_c)
-
-        # Create logs: key_a used 3 times, key_b used 2 times, key_c used 1 time
-        for _ in range(3):
-            self._make_log([title_a])
-        for _ in range(2):
-            self._make_log([title_b])
-        for _ in range(1):
-            self._make_log([title_c])
-
-        result = _get_user_top_model_keys(self._make_request(), limit=2)
-        self.assertEqual(len(result), 2)
-        self.assertEqual(result[0], key_a)
-        self.assertEqual(result[1], key_b)
-
-    def test_error_logs_are_excluded(self):
-        """Only success logs should be counted."""
-        from ai.views import _get_user_top_model_keys
-        from ai.model_clients import registry
-
-        all_keys = list(registry.keys())
-        if len(all_keys) < 2:
-            self.skipTest("Need at least 2 models in registry")
-        key_a = all_keys[0]
-        title_a = registry.title(key_a)
-
-        # Error log should NOT be counted
-        self._make_log([title_a], status="error")
-        # Success log should be counted
-        self._make_log([title_a], status="success")
-
-        result = _get_user_top_model_keys(self._make_request(), limit=2)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0], key_a)
-
-    def test_limit_respected(self):
-        """Should respect the limit parameter."""
-        from ai.views import _get_user_top_model_keys
-        from ai.model_clients import registry
-
-        all_keys = list(registry.keys())
-        if len(all_keys) < 5:
-            self.skipTest("Need at least 5 models in registry")
-        for i in range(5):
-            key = all_keys[i]
-            self._make_log([registry.title(key)])
-
-        result = _get_user_top_model_keys(self._make_request(), limit=3)
-        self.assertEqual(len(result), 3)
-
-    def test_other_users_logs_excluded(self):
-        """Logs from other users should NOT affect this user's top models."""
-        from ai.views import _get_user_top_model_keys
-        from ai.model_clients import registry
-
-        all_keys = list(registry.keys())
-        if len(all_keys) < 2:
-            self.skipTest("Need at least 2 models in registry")
-        key_a = all_keys[0]
-        key_b = all_keys[1]
-        title_a = registry.title(key_a)
-        title_b = registry.title(key_b)
-
-        # Other user's logs
-        other_user = get_user_model().objects.create_user(
-            username="other_freq_user", password="test-pass", pk=99,
-        )
-        for _ in range(5):
-            AIRequestLog.objects.create(
-                user=other_user,
-                username=other_user.username,
-                external_user_id="99",
-                user_full_name="Other User",
-                client_id="client-2",
-                source=AIRequestLog.SOURCE_WEBSOCKET,
-                mode=AIRequestLog.MODE_CHAT,
-                sent_at=timezone.now(),
-                model_names=[title_b],
-                message="test",
-                status="success",
-            )
-        # This user's logs
-        self._make_log([title_a])
-
-        result = _get_user_top_model_keys(self._make_request(), limit=2)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0], key_a)
-
-    def test_result_is_cached(self):
-        """Результат кешируется per-user (TTL 120 c): повторный вызов без
-        инвалидации возвращает закешированный список; после cache.clear() —
-        пересчитывается по актуальным логам.
-        """
-        from ai.views import _get_user_top_model_keys
-        from ai.model_clients import registry
-        from django.core.cache import cache
-
-        all_keys = list(registry.keys())
-        if len(all_keys) < 2:
-            self.skipTest("Need at least 2 models in registry")
-        key_a = all_keys[0]
-        key_b = all_keys[1]
-        title_a = registry.title(key_a)
-        title_b = registry.title(key_b)
-
-        # Сначала key_a — единственный, он и попадёт в топ.
-        for _ in range(2):
-            self._make_log([title_a])
-        result1 = _get_user_top_model_keys(self._make_request(), limit=2)
-        self.assertEqual(result1, [key_a])
-
-        # Добавляем много логов с key_b, но кеш ещё валиден (TTL 120 c) —
-        # повторный вызов должен вернуть закешированный [key_a], не key_b.
-        for _ in range(5):
-            self._make_log([title_b])
-        result2 = _get_user_top_model_keys(self._make_request(), limit=2)
-        self.assertEqual(result2, [key_a])
-
-        # После очистки кеша — пересчёт: теперь key_b встречается чаще.
-        cache.clear()
-        result3 = _get_user_top_model_keys(self._make_request(), limit=2)
-        self.assertEqual(result3[0], key_b)
 
 
 # ===================================================================
@@ -10010,8 +9764,10 @@ class AIModelStatsTests(TestCase):
         self.assertEqual((row.total_count, row.duration_count), (1, 1))
 
     def test_scoped_map_isolation(self):
-        """Карта читает РОВНО один скоуп: тема ≠ язык ≠ легаси (иначе строки
-        разных скоупов в ключе model_key перезаписывали бы друг друга)."""
+        """Карта читает РОВНО один скоуп: тема ≠ язык ≠ глобальный агрегат
+        (иначе строки разных скоупов в ключе model_key перезаписывали бы друг
+        друга). Глобальный агрегат — только языковые строки: строки темы —
+        зеркала, их нельзя суммировать (иначе пары считаются дважды)."""
         from ai.models import AIModelStats
         from ai.services.model_stats import get_model_stats_map
         AIModelStats.objects.create(
@@ -10028,16 +9784,33 @@ class AIModelStatsTests(TestCase):
         self.assertNotIn("K2", topic_stats)
         lang_stats = get_model_stats_map(["K1"], language_id=self.lang.pk)
         self.assertEqual(lang_stats["K1"], {"avg_seconds": 1.0, "percent_solved": 100.0})
-        # Без скоупа — общие данные по ВСЕМ темам и языкам: сумма scoped-строк
-        # K1 (8с/1 замер + 2с/2 замера → 10/3 = 3.3; 3 решено из 6 = 50%).
-        legacy = get_model_stats_map(["K1", "K2"])
-        self.assertEqual(legacy["K1"], {"avg_seconds": 3.3, "percent_solved": 50.0})
-        self.assertNotIn("K2", legacy)  # легаси-строка (NULL, NULL) в агрегат не попадает
+        # Без скоупа — языковые строки (по одному приращению на пару):
+        # строка темы K1 (1 из 4) не приплюсовывается, глобус = языковая строка.
+        global_stats = get_model_stats_map(["K1", "K2"])
+        self.assertEqual(global_stats["K1"], {"avg_seconds": 1.0, "percent_solved": 100.0})
+        self.assertNotIn("K2", global_stats)  # легаси-строка (NULL, NULL) в агрегат не попадает
+
+    def test_global_aggregate_does_not_double_count(self):
+        """Глобальный агрегат (без скоупа) суммирует ТОЛЬКО языковые строки:
+        каждая пара пишет и строку темы, и языковую — их сумма удвоила бы пары."""
+        from ai.services.model_stats import get_model_stats_map, record_batch_solve_stats
+        record_batch_solve_stats([
+            self._pair("K1", "solved", 2.0, self.lang.pk, self.topic.pk),
+            self._pair("K1", "failed", 4.0, self.lang.pk, self.topic.pk),
+            self._pair("K1", "solved", 3.0, self.other_lang.pk, None),
+        ])
+        # Пары по языкам: Pascal — 1 из 2 решено, замеры 2с и 4с; Python —
+        # 1 из 1, 3с. Итог по языковым строкам: 2 из 3 = 66.7%, avg = 9/3 = 3.0.
+        # С удвоением строк темы было бы 3 из 4 = 75% (avg не изменился бы).
+        self.assertEqual(
+            get_model_stats_map(["K1"]),
+            {"K1": {"avg_seconds": 3.0, "percent_solved": 66.7}},
+        )
 
     def test_available_model_options_enriched_with_stats(self):
-        """get_available_model_options читает только легаси-скоуп (NULL/NULL) —
-        data-атрибуты остались сортировке #selectModelSort (обогащение до
-        cache.set — Redis-копии не мутируем)."""
+        """get_available_model_options обогащает data-атрибуты глобальным
+        агрегатом (языковые строки) до cache.set — Redis-копии не мутируем;
+        легаси-строка (NULL/NULL) не читается."""
         from django.core.cache import cache
         from ai.models import AIModelAvailability, AIModelStats
         from ai.model_health import get_available_model_options, get_health_window_date, MODEL_CATALOG_KEYS
@@ -10045,8 +9818,12 @@ class AIModelStatsTests(TestCase):
             self.skipTest("No models in registry")
         key = MODEL_CATALOG_KEYS[0]
         AIModelStats.objects.create(
-            model_key=key, solved_count=1, total_count=1,
-            duration_count=1, duration_sum=5.0)  # легаси-строка напрямую
+            model_key=key, solved_count=2, total_count=2,
+            duration_count=2, duration_sum=10.0,
+            programming_language=self.lang, topic=None)  # языковая строка
+        AIModelStats.objects.create(
+            model_key=key, solved_count=0, total_count=1,
+            duration_count=1, duration_sum=99.0)  # легаси (NULL, NULL) — игнор
         AIModelAvailability.objects.create(
             model_key=key, model_title=key, is_available=True,
             window_date=get_health_window_date(), last_message="ok",
@@ -10741,6 +10518,44 @@ class RequestLogSearchTests(TestCase):
         self.assertIn(self.log_b, rows)
         self.assertNotIn(self.log_a, rows)
 
+    def test_user_model_filter_matches_key_and_title(self):
+        from django.db import connection as db_connection
+        if db_connection.vendor == "sqlite":
+            self.skipTest("JSON contains не поддерживается sqlite")
+        from ai.models import AIUserModel
+        owner = get_user_model().objects.create_user(username="log-um", password="x")
+        model = AIUserModel.objects.create(
+            user=owner, title="Личная модель", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m",
+        )
+        key = f"User_{model.pk}"
+        by_key = AIRequestLog.objects.create(
+            user=owner, model_names=[key], message="ошибка",
+            status=AIRequestLog.STATUS_ERROR, sent_at=timezone.now(),
+        )
+        by_title = AIRequestLog.objects.create(
+            user=owner, model_names=[model.title], message="успех",
+            status=AIRequestLog.STATUS_SUCCESS, sent_at=timezone.now(),
+        )
+        rows = self._list({"model": key})
+        self.assertIn(by_key, rows)
+        self.assertIn(by_title, rows)
+
+    def test_model_choices_include_user_models(self):
+        from ai.models import AIUserModel
+        from ai.admin.request_logs import admin_request_logs_view
+        owner = get_user_model().objects.create_user(username="log-um2", password="x")
+        model = AIUserModel.objects.create(
+            user=owner, title="Личная в фильтре",
+            provider=AIUserModel.PROVIDER_OPENAI, model_id="m",
+        )
+        request = self.factory.get("/ai/admin/ai/request_logs/")
+        request.user = self.superuser
+        request.session = {}
+        response = admin_request_logs_view(request)
+        keys = [row["key"] for row in response.context_data["model_choices"]]
+        self.assertIn(f"User_{model.pk}", keys)
+
     def test_user_filter_matches_full_name(self):
         rows = self._list({"user": "Тестов"})
         self.assertEqual(rows, [self.log_b])
@@ -11380,7 +11195,7 @@ class ModelStatsSuffixStripTests(SimpleTestCase):
     ни blur (фокус остаётся на селекте) — суффикс висел в закрытом селекте
     до первого клика по странице. Регрессионный гард на источник: слушатели
     document pointerdown/click вне селекта обязаны оставаться в
-    initModelSortSelector (static/admin/js/ai-common.js)."""
+    initModelSelectorStats (static/admin/js/ai-common.js)."""
 
     def _source(self):
         from pathlib import Path
@@ -11408,6 +11223,20 @@ class ModelStatsSuffixStripTests(SimpleTestCase):
         src = self._source()
         self.assertIn("selectPointerActive = true", src)
         self.assertIn("if (!onModelSelect || !selectPointerActive)", src)
+
+    def test_stat_columns_aligned_by_pixels(self):
+        """Процент и секунды — две независимые колонки; добивка идёт по
+        пикселям (figure space = ширина цифры + NBSP/thin/hair), а не по
+        числу символов: в пропорциональном шрифте пробел и цифра разной
+        ширины, из-за чего колонки съезжали. Единицы стоят в каждой строке,
+        заголовки групп не мутируются (опции в нативном списке отрисованы с
+        другим отступом, чем подпись optgroup)."""
+        src = self._source()
+        self.assertIn("function padStatPx(", src)
+        self.assertIn("var FIGURE_SPACE = '\\u2007';", src)
+        self.assertIn("cols.separator = NBSP + '·' + NBSP;", src)
+        self.assertNotIn("applyModelGroupUnitLabels", src)
+        self.assertNotIn("data-base-label", src)
 
 
 # ===================================================================
@@ -17204,6 +17033,16 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Группы доступа")
 
+    def test_nav_registry_entries_have_actions_slot(self):
+        """Все записи _ai_tool_defs — 9-элементные: 9-й (actions) обязателен
+        для потребителей вроде _dynamic_page_doc_permissions (Emails когда-то
+        был 8-элементным и ронял всю страницу групп IndexError'ом)."""
+        from ai.admin.site import ai_admin_site
+        tools = ai_admin_site._ai_tool_defs(self._request(self.superuser))
+        self.assertTrue(tools)
+        for tool in tools:
+            self.assertEqual(len(tool), 9, tool)
+
     def test_two_column_actions_card(self):
         """Две колонки прав (ТЗ 2026-10-20): слева — страницы без
         аккордеонов; справа — «Действия» АКТИВНЫХ страниц группы (в базе
@@ -17529,6 +17368,11 @@ class AIAccessGroupsAdminTests(_AdminViewRequestMixin, TestCase):
         self.assertIn('value="action.test_console_run"', html)
         self.assertIn('value="action.updates_publish"', html)
         self.assertIn('value="page.mgmt_users"', html)
+        # Emails и «Проверка на ИИ» — обычные чекбоксы страниц (выдаются
+        # группами вручную; служебных групп для них нет).
+        self.assertIn('value="page.emails"', html)
+        self.assertIn('value="page.check_ai"', html)
+        self.assertIn("Проверка на ИИ", html)
         self.assertIn('value="page.mgmt_shared_prompt"', html)
         self.assertIn("Видеть все промпты", html)
         self.assertIn("Запускать прогоны", html)
@@ -18797,9 +18641,6 @@ class BaseChatTemplateLocalizationTests(SimpleTestCase):
                 {"key": "X_1", "title": "X 1"},
                 {"key": "OR_X", "title": "X Open"},
             ],
-            "other_models": [{"key": "X_1", "title": "X 1"}],
-            "favorite_models": [],
-            "experimental_models": [{"key": "OR_X", "title": "X Open"}],
             "default_model_key": "X_1",
             "saved_lang": lang,
             "last_update_date": timezone.make_aware(datetime.datetime(2026, 10, 13)),
@@ -18812,8 +18653,13 @@ class BaseChatTemplateLocalizationTests(SimpleTestCase):
 
     def test_default_russian(self):
         html = self._render("Русский")
-        self.assertIn('label="Все модели"', html)
         self.assertIn("Отправить", html)
+        # Каталог — плоский список: заголовков групп нет, все модели видны.
+        self.assertIn('value="X_1"', html)
+        self.assertIn('value="OR_X"', html)
+        self.assertNotIn('data-ai-group="favorites"', html)
+        self.assertNotIn('data-ai-group="all"', html)
+        self.assertNotIn('data-ai-group="experimental"', html)
         self.assertIn("Админ-Панель", html)
         # Верхняя панель: «Мои модели» — всем, админка — по правам.
         self.assertIn('id="myModelsTopBtn"', html)
@@ -18830,15 +18676,15 @@ class BaseChatTemplateLocalizationTests(SimpleTestCase):
 
     def test_english_render(self):
         html = self._render("English")
-        self.assertIn('label="All models"', html)
         self.assertIn(">Send<", html)
         self.assertIn("Admin Panel", html)
-        self.assertIn('data-ai-group="experimental"', html)
+        self.assertIn('value="OR_X"', html)
+        self.assertNotIn('data-ai-group="experimental"', html)
 
     def test_french_render(self):
         html = self._render("Français")
-        self.assertIn('label="Tous les modèles"', html)
         self.assertIn("Envoyer", html)
+        self.assertIn('value="X_1"', html)
         self.assertIn("Panneau Admin", html)
 
     def test_browser_check_loads_before_common_js(self):
@@ -19259,6 +19105,77 @@ class ModelStatusCapabilityBadgeTests(SimpleTestCase):
         self.assertTrue(IMPLEMENTED_CAPABILITIES["text"])
         self.assertTrue(IMPLEMENTED_CAPABILITIES["vision"])
         self.assertTrue(IMPLEMENTED_CAPABILITIES["reasoning"])
+
+
+class ModelStatusBillingTests(TestCase):
+    """Тариф «платная/бесплатная» — ТОЛЬКО админская «Состояние моделей».
+
+    Провайдер определяется по хвосту ``handler.__module__``; в пользовательский
+    селектор и ARM-опции поле не попадает.
+    """
+
+    def test_registry_billing_by_provider(self):
+        from ai.model_clients.registry import registry
+
+        expected = {
+            "Web_DeepSeek": "free",
+            "Web_Kimi": "free",
+            "OR_Nemotron_Nano_12B_VL": "free",
+            # Ollama — платный провайдер.
+            "Ollama_Gemma_4_Cloud": "paid",
+        }
+        for key, billing in expected.items():
+            self.assertEqual(registry.billing(key), billing, msg=key)
+        self.assertEqual(registry.billing("No_Such_Model"), "")
+
+    def test_status_rows_carry_billing_labels(self):
+        from ai.model_health import get_model_status_rows
+
+        rows = {row["key"]: row for row in get_model_status_rows()}
+        self.assertEqual(rows["Web_DeepSeek"]["billing"], "free")
+        self.assertEqual(rows["Web_DeepSeek"]["billing_label"], "Бесплатная")
+        self.assertEqual(rows["Ollama_Gemma_4_Cloud"]["billing"], "paid")
+        self.assertEqual(rows["Ollama_Gemma_4_Cloud"]["billing_label"], "Платная")
+        for row in rows.values():
+            self.assertIn(row["billing"], ("free", "paid", ""))
+
+    def test_api_serializer_passes_billing(self):
+        from ai.admin.model_status import _serialize_model_status_rows_for_api
+
+        payload = _serialize_model_status_rows_for_api([
+            {"key": "A", "billing": "paid", "billing_label": "Платная"},
+        ])[0]
+        self.assertEqual(payload["billing"], "paid")
+        self.assertEqual(payload["billing_label"], "Платная")
+
+    def test_billing_does_not_leak_to_user_or_arm_options(self):
+        from ai.model_health import (
+            get_arm_solve_model_options,
+            get_available_model_options,
+        )
+
+        for option in get_available_model_options():
+            self.assertNotIn("billing", option)
+            self.assertNotIn("billing_label", option)
+        for option in get_arm_solve_model_options():
+            self.assertNotIn("billing", option)
+            self.assertNotIn("billing_label", option)
+
+    def test_template_js_and_css_render_billing(self):
+        from pathlib import Path
+        from django.template.loader import get_template
+
+        base = Path(__file__).resolve().parent.parent
+        src = get_template("admin/ai/model_status.html").template.source
+        self.assertIn("<th>Оплата</th>", src)
+        self.assertIn("billing-{{ row.billing }}", src)
+        js = (base / "static" / "admin" / "ai" / "model_status" / "index.js").read_text(
+            encoding="utf-8")
+        self.assertIn("billing-${escapeHtml(row.billing", js)
+        css = (base / "static" / "admin" / "ai" / "model_status" / "index.css").read_text(
+            encoding="utf-8")
+        self.assertIn(".billing-free", css)
+        self.assertIn(".billing-paid", css)
 
 
 class LanguageRequirementsTests(SimpleTestCase):
@@ -20624,9 +20541,9 @@ class ModelStatsApiTests(TestCase):
         self.assertEqual(data["stats"][self.model_key]["percent_solved"], 0.0)
 
     def test_global_aggregate_when_requested_without_scope(self):
-        """Без языка/темы — ОБЩИЕ данные по всем темам и языкам: взвешенная
-        сумма scoped-строк модели; легаси-строки (NULL, NULL) в агрегат не
-        попадают; битый progLng по-прежнему пусто."""
+        """Без языка/темы — ОБЩИЕ данные по всем языкам: взвешенная сумма
+        языковых строк модели; легаси-строки (NULL, NULL) и строки тем в
+        агрегат не попадают; битый progLng по-прежнему пусто."""
         self._record("solved", 2.0, None)
         stats = json.loads(self._request({}).content)["stats"]
         self.assertEqual(
@@ -20651,8 +20568,8 @@ class ModelStatsApiTests(TestCase):
         )
 
     def test_global_aggregate_spans_languages_and_topics(self):
-        """Общий скоуп суммирует ВСЕ языки и темы модели (взвешенно), а не
-        только последний записанный язык."""
+        """Общий скоуп суммирует языковые строки ВСЕХ языков модели
+        (взвешенно), а не только последний записанный язык."""
         other_lang = ProgrammingLanguage.objects.create(language_name="Python")
         self._record("solved", 2.0, None)                       # Pascal-языковая
         self._record("failed", 4.0, None)                       # Pascal-языковая
@@ -20666,6 +20583,24 @@ class ModelStatsApiTests(TestCase):
         stats = json.loads(self._request({}).content)["stats"]
         self.assertEqual(
             stats[self.model_key], {"avg_seconds": 2.3, "percent_solved": 66.7})
+
+    def test_global_aggregate_ignores_topic_mirror_rows(self):
+        """Пара с темой пишет и строку темы, и языковую. Глобальный агрегат
+        читает только языковые — иначе пары считались бы дважды."""
+        from ai.models import AIModelStats
+        AIModelStats.objects.create(
+            model_key=self.model_key, solved_count=1, total_count=2,
+            duration_count=2, duration_sum=6.0,
+            programming_language=self.lang, topic=None)
+        AIModelStats.objects.create(
+            model_key=self.model_key, solved_count=10, total_count=10,
+            duration_count=10, duration_sum=10.0,
+            programming_language=self.lang, topic=self.topic)
+        stats = json.loads(self._request({}).content)["stats"]
+        # Только языковая строка: 1 из 2 = 50%, avg = 6/2 = 3.0.
+        # С суммированием строки темы было бы 11 из 12 = 91.7%, avg = 1.3.
+        self.assertEqual(
+            stats[self.model_key], {"avg_seconds": 3.0, "percent_solved": 50.0})
 
     def test_no_rows_for_scope(self):
         self._record("solved", 2.0, self.topic.pk)
@@ -20765,9 +20700,13 @@ class DeleteArmRunStatsTests(TestCase):
 
 
 class ClientStatsGatingTests(SimpleTestCase):
-    """Статик-контракт суффиксов (Batch B): суффиксы живут только на задачных
-    страницах (гейт по #selectProgLng), цифры — из скоуп-ответа
-    /ai/api/model-stats/, data-атрибуты остались сортировке."""
+    """Статик-контракт суффиксов и сортировки плоского селектора.
+
+    Показ цифр и ранжирование разделены: цифры — только фактический скоуп
+    языка/темы (в чате и в глобальном фолбэке их нет), порядок и авто-выбор —
+    по скоупу либо глобальному агрегату. Пользовательского переключателя
+    режима нет; «Часто используемые»/«Все модели»/«Экспериментальные» удалены.
+    """
 
     def _read(self, *parts):
         from django.conf import settings
@@ -20779,19 +20718,52 @@ class ClientStatsGatingTests(SimpleTestCase):
         self.assertIn("function modelSuffixesEnabled()", js)
         self.assertIn("if (!modelSelect || !modelSuffixesEnabled()) return;", js)
         self.assertIn("function updateScopedModelStats()", js)
+        self.assertIn("if (!progLng) return;", js)  # чат не делает лишний запрос
         self.assertIn("'/ai/api/model-stats/'", js)
         self.assertIn("function scopedModelOptionStats(opt)", js)
+        # Показ цифр отделён от ранжирования: в чате/фолбэке цифр нет.
+        self.assertIn("function displayStatsForOption(opt)", js)
+        self.assertIn("function rankingStatsForOption(opt)", js)
+        self.assertNotIn("function activeModelOptionStats(opt)", js)
+        self.assertIn("function sortModelOptionsByStats()", js)
+        # Плоский каталог: сортируем прямые OPTION, личные optgroup не трогаем.
+        self.assertIn("Array.prototype.filter.call(modelSelect.children", js)
+        self.assertIn("insertBefore(opt, firstGroup)", js)
+        # Авто-выбор лучшей модели и признак «выбрано вручную/авто».
+        self.assertIn("function selectBestModelForScope()", js)
+        self.assertIn("st.modelAuto", js)
+        self.assertIn("_modelAutoSelecting", js)
         # Wiring: смена #selectProgLng/#selectTheme + init/repopulate тянут скоуп.
         self.assertGreaterEqual(js.count("updateScopedModelStats();"), 4)
 
-    def test_base_chat_keeps_sort_data_attrs(self):
+    def test_base_chat_keeps_global_data_attrs(self):
         # Шапка вынесена в общий partial — проверяем её вместе с базовым
         # шаблоном (base_chat только подключает _top_panel.html).
         tpl = self._read("ai", "templates", "ai", "base_chat.html") + self._read(
             "ai", "templates", "ai", "_top_panel.html")
         self.assertIn("data-avg-seconds", tpl)
         self.assertIn("data-percent-solved", tpl)
-        self.assertIn("selectModelSort", tpl)
+        self.assertNotIn("selectModelSort", tpl)
+        # Каталог — плоские <option>; групп «Все модели»/«Экспериментальные» нет.
+        self.assertNotIn('data-ai-group="all"', tpl)
+        self.assertNotIn('data-ai-group="experimental"', tpl)
+        self.assertNotIn('data-ai-group="favorites"', tpl)
+
+    def test_sort_mode_switch_removed_everywhere(self):
+        """Переключатель режима сортировки удалён целиком (KISS): нет ни
+        элемента, ни localStorage-ключа в любом клиентском статике."""
+        files = (
+            ("static", "admin", "js", "ai-common.js"),
+            ("static", "admin", "js", "ai-wizard.js"),
+            ("static", "admin", "css", "ai.css"),
+            ("ai", "templates", "ai", "_top_panel.html"),
+            ("ai", "i18n.py"),
+        )
+        for parts in files:
+            text = self._read(*parts)
+            for needle in ("selectModelSort", "ai_model_sort_mode", "MODEL_SORT_KEY",
+                           "sortDefault", "sortSpeed", "sortAccuracy", "sortBoth"):
+                self.assertNotIn(needle, text, msg="%s: %s" % ("/".join(parts), needle))
 
     def test_arm_runner_results_carry_scope(self):
         src = self._read("ai", "arm_runner.py")
@@ -21130,18 +21102,20 @@ class ChatThinkToggleStaticTests(TestCase):
         self.assertIn(".think-toggle[hidden] {", css)
 
     def test_wizard_chat_tour_think_step(self):
-        """Чат-тур: шаг кнопки Think — ПОСЛЕ выбора модели и ДО сортировки
+        """Чат-тур: шаг кнопки Think — ПОСЛЕ выбора модели и ДО режима
         (по требованию владельца), с skipIfHidden: кнопка скрыта на
         не-Ollama моделях, шаг пропускается мгновенно (контракт «скрыта
         сейчас = шаг не для этого состояния»), а не ждать и падать.
-        en/fr-переводы шага на месте (триязычный клиент)."""
+        Шага сортировки моделей больше нет. en/fr-переводы шага на месте
+        (триязычный клиент)."""
         js = self._read("static", "admin", "js", "ai-wizard.js")
         chat = js[js.index("        chat: ["): js.index("        solve: [")]
         self.assertIn('sel: "#thinkToggleBtn"', chat)
         self.assertLess(
             chat.index('sel: "#select", rank: 11'), chat.index('sel: "#thinkToggleBtn"'))
         self.assertLess(
-            chat.index('sel: "#thinkToggleBtn"'), chat.index('sel: "#selectModelSort"'))
+            chat.index('sel: "#thinkToggleBtn"'), chat.index('sel: "#selectType"'))
+        self.assertNotIn("#selectModelSort", chat)
         step_at = js.index('sel: "#thinkToggleBtn", rank: 12')
         self.assertIn("skipIfHidden: true", js[step_at: step_at + 300])
         # Движок: мгновенный пропуск скрытой цели по флагу шага.
@@ -21304,6 +21278,85 @@ class KeyedPageAccessTests(_AdminViewRequestMixin, TestCase):
         )
         request = self._admin_request(updater2, path="/x/")
         self.assertTrue(admin.has_change_permission(request, obj=None))
+
+    def test_emails_page_by_key_only(self):
+        """page.emails: держатель ключа видит справочник; без ключа — 403."""
+        from ai.admin.emails import view as emails_view
+
+        user = self._grant("emails-key", ["page.admin", "page.emails"])
+        request = self._admin_request(user, path="/ai/admin/emails/")
+        self.assertEqual(emails_view.view(request).status_code, 200)
+
+        user2 = self._grant("emails-plain", ["page.admin"])
+        request = self._admin_request(user2, path="/ai/admin/emails/")
+        self.assertEqual(emails_view.view(request).status_code, 403)
+
+        # «Посмотреть как…»: суперюзерский обход выключен, без ключа — 403.
+        superuser = self.user_model.objects.create_superuser(
+            username="emails-super", password="x", email="s@a.com",
+        )
+        request = self._admin_request(superuser, path="/ai/admin/emails/")
+        self._enter_view_as(request, self._view_as_group("Эмуля-emails", ["page.admin"]))
+        self.assertEqual(emails_view.view(request).status_code, 403)
+        self._leave_view_as(superuser)
+
+    def test_check_ai_page_by_key_only(self):
+        """page.check_ai: держатель ключа видит форму; без ключа — 403."""
+        from ai.admin.check_ai import admin_check_ai_view
+
+        user = self._grant("checkai-key", ["page.admin", "page.check_ai"])
+        request = self._admin_request(user, path="/ai/admin/check-ai/")
+        self.assertEqual(admin_check_ai_view(request).status_code, 200)
+
+        user2 = self._grant("checkai-plain", ["page.admin"])
+        request = self._admin_request(user2, path="/ai/admin/check-ai/")
+        self.assertEqual(admin_check_ai_view(request).status_code, 403)
+
+        superuser = self.user_model.objects.create_superuser(
+            username="checkai-super", password="x", email="s@a.com",
+        )
+        request = self._admin_request(superuser, path="/ai/admin/check-ai/")
+        self._enter_view_as(request, self._view_as_group("Эмуля-checkai", ["page.admin"]))
+        self.assertEqual(admin_check_ai_view(request).status_code, 403)
+        self._leave_view_as(superuser)
+
+    def test_emails_add_delete_and_malformed_pk(self):
+        """Справочник: добавление, удаление по pk; мусорный pk — redirect, не 500."""
+        from ai.admin.emails import view as emails_view
+        from ai.models import UserToEmailDictionary
+
+        user = self._grant("emails-crud", ["page.admin", "page.emails"])
+
+        add = self._admin_request(
+            user, method="post", path="/ai/admin/emails/",
+            data={"user": "Иванов Иван", "email": "ivanov@example.com"},
+        )
+        self.assertEqual(emails_view.view(add).status_code, 302)
+        row = UserToEmailDictionary.objects.get(user="Иванов Иван")
+
+        delete = self._admin_request(
+            user, method="post", path="/ai/admin/emails/",
+            data={"action": "delete", "pk": row.pk},
+        )
+        self.assertEqual(emails_view.view(delete).status_code, 302)
+        self.assertFalse(UserToEmailDictionary.objects.filter(pk=row.pk).exists())
+
+        bad = self._admin_request(
+            user, method="post", path="/ai/admin/emails/",
+            data={"action": "delete", "pk": "abc"},
+        )
+        self.assertEqual(emails_view.view(bad).status_code, 302)
+
+    def test_new_pages_have_permissions_without_service_group(self):
+        """Ключи Emails/Check AI засижены для чекбоксов; группы «Check AI» нет."""
+        from ai.models import AIAccessGroup, AIAdminGroupPermission
+
+        self.assertFalse(AIAccessGroup.objects.filter(name="Check AI").exists())
+        self.assertTrue(
+            AIAdminGroupPermission.objects.filter(key="page.emails").exists())
+        check = AIAdminGroupPermission.objects.get(key="page.check_ai")
+        self.assertEqual(check.label, "Проверка на ИИ")
+        self.assertEqual(check.section, AIAdminGroupPermission.SECTION_PAGE)
 
 
 class BaselineMarkerTests(_AdminViewRequestMixin, TestCase):
@@ -22313,7 +22366,7 @@ class UserModelSharingCrudTests(TestCase):
         payload.update(overrides)
         return payload
 
-    def test_owner_can_set_access(self):
+    def test_owner_requests_public_access(self):
         from ai.services.user_models import save_user_model
         ok, message, _ = save_user_model(self.owner, self._payload(
             is_public=True,
@@ -22321,7 +22374,10 @@ class UserModelSharingCrudTests(TestCase):
         ))
         self.assertTrue(ok, message)
         self.model.refresh_from_db()
-        self.assertTrue(self.model.is_public)
+        # Публичность НЕ включается сразу: создаётся заявка на модерацию.
+        self.assertFalse(self.model.is_public)
+        self.assertTrue(self.model.public_requested)
+        self.assertIsNone(self.model.public_reviewed_at)
         self.assertEqual(
             set(self.model.shared_with.values_list("pk", flat=True)),
             {self.friend.pk, self.friend2.pk},
@@ -22469,15 +22525,159 @@ class UserModelSuperuserAccessTests(_AdminViewRequestMixin, TestCase):
             delattr(self.superuser, "_ai_view_as_group_pk")
         self.assertEqual(response.status_code, 404)
 
-    def test_all_models_rows_have_no_config_fields(self):
+    def test_all_models_rows_show_identity_but_not_secrets(self):
         from ai.services.user_models import admin_user_model_rows
         rows = admin_user_model_rows()
         row = next(item for item in rows if item["id"] == self.model.pk)
         self.assertEqual(row["owner_display"], "su-owner")
+        # Суперюзер должен понимать, что одобряет: провайдер и ID видны.
+        self.assertEqual(row["provider"], "openai")
+        self.assertEqual(row["provider_label"], "OpenAI")
+        self.assertEqual(row["model_id"], "orig-model")
+        # Endpoint, ключи и настройки чужих моделей — по-прежнему скрыты.
         for forbidden in ("base_url", "api_key", "api_key_encrypted",
-                          "model_id", "provider", "max_tokens",
-                          "supports_vision", "supports_think"):
+                          "max_tokens", "supports_vision", "supports_think"):
             self.assertNotIn(forbidden, row)
+
+
+class UserModelPublicModerationTests(TestCase):
+    """Публикация «для всех» — только после одобрения суперюзером."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        User = get_user_model()
+        self.owner = User.objects.create_user(username="mod-owner", password="x")
+        self.other = User.objects.create_user(username="mod-other", password="x")
+        self.superuser = User.objects.create_superuser(
+            username="mod-su", password="x", email="mod-su@t.com",
+        )
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Модерация", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="m", base_url="https://api.openai.com/v1",
+        )
+        self.key = f"User_{self.model.pk}"
+
+    def _payload(self, **overrides):
+        payload = {
+            "id": self.model.pk, "title": "Модерация", "provider": "openai",
+            "model_id": "m", "max_tokens": 8000, "is_active": True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_pending_is_not_public_for_anyone_else(self):
+        from ai.services.user_models import (
+            find_user_model, public_user_models_for, set_user_model_access,
+        )
+        ok, message = set_user_model_access(
+            self.owner, self.model.pk, public_request=True,
+        )
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+        self.assertTrue(self.model.public_requested)
+        self.assertIsNone(find_user_model(self.other, self.key))
+        self.assertEqual(public_user_models_for(self.other), [])
+
+    def test_superuser_approves_publication(self):
+        from ai.services.user_models import (
+            find_user_model, public_status_for, set_user_model_access,
+        )
+        set_user_model_access(self.owner, self.model.pk, public_request=True)
+        ok, message = set_user_model_access(self.superuser, self.model.pk, is_public=True)
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.is_public)
+        self.assertFalse(self.model.public_requested)
+        self.assertEqual(self.model.public_reviewed_by_id, self.superuser.pk)
+        self.assertIsNotNone(self.model.public_reviewed_at)
+        self.assertEqual(public_status_for(self.model), "public")
+        self.assertIsNotNone(find_user_model(self.other, self.key))
+
+    def test_superuser_rejects_and_owner_can_request_again(self):
+        from ai.services.user_models import set_user_model_access
+        set_user_model_access(self.owner, self.model.pk, public_request=True)
+        ok, message = set_user_model_access(self.superuser, self.model.pk, is_public=False)
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+        self.assertFalse(self.model.public_requested)
+        self.assertIsNotNone(self.model.public_reviewed_at)
+        self.assertEqual(self.model.public_reviewed_by_id, self.superuser.pk)
+
+        ok, message = set_user_model_access(
+            self.owner, self.model.pk, public_request=True,
+        )
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertTrue(self.model.public_requested)
+        self.assertIsNone(self.model.public_reviewed_at)
+        self.assertIsNone(self.model.public_reviewed_by_id)
+
+    def test_config_change_revokes_existing_publication(self):
+        from ai.services.user_models import save_user_model, set_user_model_access
+        set_user_model_access(self.superuser, self.model.pk, is_public=True)
+        ok, message, _ = save_user_model(self.owner, self._payload(model_id="changed"))
+        self.assertTrue(ok, message)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+        self.assertFalse(self.model.public_requested)
+        self.assertIsNone(self.model.public_reviewed_at)
+        self.assertIsNone(self.model.public_reviewed_by_id)
+
+    def test_owner_is_forbidden_to_approve_own_model(self):
+        from ai.services.user_models import set_user_model_access
+        ok, message = set_user_model_access(self.owner, self.model.pk, is_public=True)
+        self.assertFalse(ok)
+        self.assertIn("суперпользователь", message)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+
+
+class UserModelJournalHelpersTests(TestCase):
+    """Журнал запросов: личные модели показываются и фильтруются по-человечески."""
+
+    def setUp(self):
+        from ai.models import AIUserModel
+        User = get_user_model()
+        self.owner = User.objects.create_user(
+            username="log-owner", password="x", first_name="Иван", last_name="Тестов",
+        )
+        self.model = AIUserModel.objects.create(
+            user=self.owner, title="Личная Qwen", provider=AIUserModel.PROVIDER_OPENAI,
+            model_id="qwen-local",
+        )
+        self.key = f"User_{self.model.pk}"
+
+    def test_raw_key_is_rendered_as_readable_label(self):
+        from ai.services.user_models import format_model_names
+        text = format_model_names([self.key])
+        self.assertIn("Личная Qwen", text)
+        self.assertIn("Иван Тестов", text)
+        self.assertIn("(личная)", text)
+        self.assertNotIn(self.key, text)
+
+    def test_deleted_model_key_is_not_raw(self):
+        from ai.services.user_models import format_model_names
+        self.model.delete()
+        text = format_model_names([self.key])
+        self.assertIn("удалённая личная модель", text)
+
+    def test_filter_choices_include_user_models(self):
+        from ai.services.user_models import user_model_filter_choices
+        choices = user_model_filter_choices()
+        row = next(item for item in choices if item["key"] == self.key)
+        self.assertIn("Личная Qwen", row["title"])
+
+    def test_journal_row_uses_readable_label(self):
+        from ai.admin.request_logs import build_log_table_row
+        log = AIRequestLog.objects.create(
+            user=self.owner, model_names=[self.key], message="привет",
+            source=AIRequestLog.SOURCE_WEBSOCKET, sent_at=timezone.now(),
+        )
+        row = build_log_table_row(log)
+        self.assertIn("Личная Qwen", row["model_display"])
+        self.assertNotIn(self.key, row["model_display"])
 
 
 class UserSearchTests(TestCase):
@@ -22747,12 +22947,22 @@ class UserModelClientAccessViewTests(TestCase):
                    return_value=external_id):
             return my_model_access_view(request)
 
-    def test_owner_sets_public(self):
-        response = self._post(self.owner, {"id": self.model.pk, "is_public": True,
+    def test_owner_requests_publication(self):
+        response = self._post(self.owner, {"id": self.model.pk,
+                                           "public_request": True,
                                            "shared_with": []})
         self.assertEqual(response.status_code, 200)
         self.model.refresh_from_db()
-        self.assertTrue(self.model.is_public)
+        self.assertFalse(self.model.is_public)
+        self.assertTrue(self.model.public_requested)
+
+    def test_owner_cannot_publish_directly(self):
+        response = self._post(self.owner, {"id": self.model.pk, "is_public": True,
+                                           "shared_with": []})
+        self.assertEqual(response.status_code, 400)
+        self.model.refresh_from_db()
+        self.assertFalse(self.model.is_public)
+        self.assertFalse(self.model.public_requested)
 
     def test_foreign_private_model_is_not_found(self):
         response = self._post(self.other, {"id": self.model.pk, "is_public": True,
@@ -27522,6 +27732,23 @@ class PromptLabRunnerTests(TransactionTestCase):
             time.sleep(0.05)
         self.fail("Прогон не завершился за отведённое время")
 
+    def test_or_models_allowed_groq_rejected(self):
+        """Prompt Lab делит предикат с ARM: OR_* идёт (ради статистики), Groq — нет."""
+        from ai.prompt_lab_runner import PromptLabError, _resolve_models
+
+        handlers = {
+            "OR_test": {"title": "OpenRouter", "handler": lambda *a: None},
+            "Web_DeepSeek": {"title": "Web", "handler": lambda *a: None},
+            "Groq_test": {"title": "Groq", "handler": lambda *a: None},
+        }
+        with patch("ai.prompt_lab_runner.get_runtime_model_handlers",
+                   return_value=handlers):
+            models = _resolve_models(["OR_test", "Web_DeepSeek", "Groq_test"])
+            self.assertEqual(
+                [m["key"] for m in models], ["OR_test", "Web_DeepSeek"])
+            with self.assertRaises(PromptLabError):
+                _resolve_models(["Groq_test"])
+
     def test_run_records_results_metrics_and_request_log(self):
         from ai.prompt_lab_runner import start_prompt_lab_run
 
@@ -27641,6 +27868,24 @@ class PromptLabAdminTests(_AdminViewRequestMixin, TestCase):
         group.users.add(user)
         response = self._call(user, admin_prompt_lab_view)
         self.assertEqual(response.status_code, 200)
+
+    def test_css_follows_admin_theme(self):
+        """Лаборатория не хардкодит светлые цвета: иначе тёмная тема белая."""
+        from pathlib import Path
+        from django.conf import settings
+        from django.template.loader import get_template
+
+        source = get_template(
+            "admin/ai/prompt_lab.html",
+        ).template.source
+        self.assertIn("prompt_lab/index.css' %}?v=2", source)
+        css = (
+            Path(settings.BASE_DIR) / "static/admin/ai/prompt_lab/index.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn("var(--body-bg)", css)
+        self.assertIn("var(--darkened-bg)", css)
+        for hardcoded in ("#fff", "#ffffff", "#ddd", "#f6f6f6"):
+            self.assertNotIn(hardcoded, css.lower())
 
     def test_start_endpoint_rejects_empty_payload(self):
         from ai.admin.prompt_lab import admin_prompt_lab_start_view

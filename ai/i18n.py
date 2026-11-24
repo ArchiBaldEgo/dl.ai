@@ -142,16 +142,9 @@ _CLIENT_STRINGS = {
         "voiceInput": "Голосовой ввод",
         "voiceOutput": "Озвучить ответ",
         "speakThinkLabel": "Озвучивать дополнительную информацию",
-        "sortDefault": "Порядок: по алфавиту",
-        "sortSpeed": "Порядок: по скорости",
-        "sortAccuracy": "Порядок: по точности",
-        "sortBoth": "Порядок: скорость + точность",
-        "favoritesGroup": "Часто используемые",
         "myModelsGroup": "Мои модели",
         "sharedModelsGroup": "Доступные мне",
         "publicModelsGroup": "Публичные",
-        "allModelsGroup": "Все модели",
-        "experimentalModelsGroup": "Экспериментальные модели",
         "noModels": "Сегодня нет доступных моделей",
         "task": "Задача:",
         "taskplace": "Вставьте сюда условие задачи",
@@ -202,16 +195,9 @@ _CLIENT_STRINGS = {
         "voiceInput": "Voice input",
         "voiceOutput": "Speak answer",
         "speakThinkLabel": "Voice extra information",
-        "sortDefault": "Order: alphabetical",
-        "sortSpeed": "Order: by speed",
-        "sortAccuracy": "Order: by accuracy",
-        "sortBoth": "Order: speed + accuracy",
-        "favoritesGroup": "Frequently used",
         "myModelsGroup": "My models",
         "sharedModelsGroup": "Shared with me",
         "publicModelsGroup": "Public",
-        "allModelsGroup": "All models",
-        "experimentalModelsGroup": "Experimental models",
         "noModels": "No models available today",
         "task": "Task:",
         "taskplace": "Paste the task condition here",
@@ -262,16 +248,9 @@ _CLIENT_STRINGS = {
         "voiceInput": "Saisie vocale",
         "voiceOutput": "Lire la réponse",
         "speakThinkLabel": "Informations supplémentaires vocales",
-        "sortDefault": "Ordre : alphabétique",
-        "sortSpeed": "Ordre : par vitesse",
-        "sortAccuracy": "Ordre : par précision",
-        "sortBoth": "Ordre : vitesse + précision",
-        "favoritesGroup": "Fréquemment utilisés",
         "myModelsGroup": "Mes modèles",
         "sharedModelsGroup": "Partagés avec moi",
         "publicModelsGroup": "Publics",
-        "allModelsGroup": "Tous les modèles",
-        "experimentalModelsGroup": "Modèles expérimentaux",
         "noModels": "Aucun modèle disponible aujourd'hui",
         "task": "Tâche :",
         "taskplace": "Collez ici l'énoncé de la tâche",
@@ -311,7 +290,8 @@ _USER_MODELS_STRINGS = {
             "группой «Мои модели». Модель должна работать без VPN: адрес "
             "провайдера должен быть доступен из сети университета без обхода "
             "ограничений. По умолчанию модель доступна только вам; при "
-            "желании дайте доступ конкретным пользователям или всем сразу. "
+            "желании дайте доступ конкретным пользователям или запросите "
+            "доступ для всех — заявку рассмотрит суперпользователь. "
             "Ключ API хранится зашифрованным и нигде не показывается в "
             "открытом виде."
         ),
@@ -354,10 +334,12 @@ _USER_MODELS_STRINGS = {
         "msgDeleteConfirm": "Удалить модель? Её нельзя будет выбрать в чате и на страницах решения.",
         "errSave": "Ошибка сохранения",
         "errDelete": "Ошибка удаления",
-        "checkPublic": "Доступна ВСЕМ",
+        "checkPublic": "Запросить доступ для всех",
         "publicWarning": (
-            "Модель станет публичной — её увидят и смогут использовать ВСЕ "
-            "пользователи на страницах чата, «Реши задачу» и «В чём ошибка?»."
+            "Заявка уйдёт суперпользователю на проверку. До одобрения модель "
+            "видят только вы и пользователи, которым вы выдали адресный "
+            "доступ; после одобрения её сможет использовать любой на "
+            "страницах чата, «Реши задачу» и «В чём ошибка?»."
         ),
         "fieldShare": "Доступ к модели",
         "shareSearchPlaceholder": "DL-id или ФИО (минимум 2 символа)",
@@ -367,18 +349,24 @@ _USER_MODELS_STRINGS = {
         "colAccess": "Доступ",
         "accessPublic": "всем",
         "accessPrivate": "только я",
+        "accessPending": "на модерации",
+        "accessRejected": "отклонено",
         "accessUnit": "польз.",
         "allModelsTitle": "Все модели",
         "allModelsIntro": (
-            "Таблица видна только суперпользователю. Можно менять публичность "
-            "и список доступа; адреса, ключи и настройки чужих моделей не "
-            "показываются."
+            "Таблица видна только суперпользователю. Видны провайдер и ID "
+            "модели, можно менять список адресного доступа и одобрять "
+            "заявки на публикацию; адреса, ключи и настройки чужих моделей "
+            "не показываются."
         ),
         "colOwner": "Владелец",
         "colManage": "Управление",
         "accessPanelTitle": "Доступ к модели",
         "btnSaveAccess": "Сохранить доступ",
         "btnAccess": "Настроить доступ",
+        "btnApprove": "Одобрить",
+        "btnReject": "Отклонить",
+        "btnRevoke": "Снять с публикации",
         "msgAccessSaved": "Доступ сохранён.",
         "errAccessSave": "Не удалось сохранить доступ",
         "errSearch": "Не удалось выполнить поиск",
@@ -392,8 +380,9 @@ _USER_MODELS_STRINGS = {
             "VPN: the provider address must be reachable from the university "
             "network without bypassing restrictions. By default the model is "
             "available only to you; you can grant access to specific users "
-            "or to everyone. The API key is stored encrypted and is never "
-            "shown in plain text."
+            "or request access for everyone — a superuser reviews the "
+            "request. The API key is stored encrypted and is never shown in "
+            "plain text."
         ),
         "newModel": "New model",
         "editModel": "Edit model",
@@ -434,11 +423,12 @@ _USER_MODELS_STRINGS = {
         "msgDeleteConfirm": "Delete the model? It will no longer be selectable in the chat and on the task pages.",
         "errSave": "Save error",
         "errDelete": "Delete error",
-        "checkPublic": "Available to EVERYONE",
+        "checkPublic": "Request access for everyone",
         "publicWarning": (
-            "The model will become public — ALL users will see it and be able "
-            "to use it on the chat, “Solve the task” and “What is the error?” "
-            "pages."
+            "The request will be sent to a superuser for review. Until it is "
+            "approved, only you and the users you granted access to can see "
+            "the model; after approval anyone can use it on the chat, “Solve "
+            "the task” and “What is the error?” pages."
         ),
         "fieldShare": "Model access",
         "shareSearchPlaceholder": "DL ID or full name (at least 2 characters)",
@@ -448,18 +438,24 @@ _USER_MODELS_STRINGS = {
         "colAccess": "Access",
         "accessPublic": "everyone",
         "accessPrivate": "only me",
+        "accessPending": "under review",
+        "accessRejected": "rejected",
         "accessUnit": "users",
         "allModelsTitle": "All models",
         "allModelsIntro": (
-            "This table is visible to superusers only. You can change "
-            "visibility and the access list; URLs, keys and settings of other "
-            "users' models are not shown."
+            "This table is visible to superusers only. Provider and model ID "
+            "are shown; you can change the direct-access list and approve "
+            "publication requests. URLs, keys and settings of other users' "
+            "models are not shown."
         ),
         "colOwner": "Owner",
         "colManage": "Manage",
         "accessPanelTitle": "Model access",
         "btnSaveAccess": "Save access",
         "btnAccess": "Manage access",
+        "btnApprove": "Approve",
+        "btnReject": "Reject",
+        "btnRevoke": "Unpublish",
         "msgAccessSaved": "Access saved.",
         "errAccessSave": "Could not save access",
         "errSearch": "Search failed",
@@ -474,8 +470,9 @@ _USER_MODELS_STRINGS = {
             "du fournisseur doit être accessible depuis le réseau de "
             "l'université sans contournement des restrictions. Par défaut, le "
             "modèle n'est accessible qu'à vous ; vous pouvez ouvrir l'accès "
-            "à des utilisateurs précis ou à tous. La clé API est stockée "
-            "chiffrée et n'est jamais affichée en clair."
+            "à des utilisateurs précis ou demander l'accès pour tous — la "
+            "demande est examinée par un superutilisateur. La clé API est "
+            "stockée chiffrée et n'est jamais affichée en clair."
         ),
         "newModel": "Nouveau modèle",
         "editModel": "Modification du modèle",
@@ -516,11 +513,13 @@ _USER_MODELS_STRINGS = {
         "msgDeleteConfirm": "Supprimer le modèle ? Il ne sera plus sélectionnable dans le chat et sur les pages de tâche.",
         "errSave": "Erreur d'enregistrement",
         "errDelete": "Erreur de suppression",
-        "checkPublic": "Accessible à TOUS",
+        "checkPublic": "Demander l'accès pour tous",
         "publicWarning": (
-            "Le modèle deviendra public — TOUS les utilisateurs le verront et "
-            "pourront l'utiliser dans le chat, « Résoudre la tâche » et "
-            "« Quelle est l'erreur ? »."
+            "La demande sera envoyée à un superutilisateur pour vérification. "
+            "Jusqu'à son approbation, seuls vous et les utilisateurs auxquels "
+            "vous avez accordé l'accès pouvez voir le modèle ; après "
+            "approbation, tout le monde pourra l'utiliser dans le chat, "
+            "« Résoudre la tâche » et « Quelle est l'erreur ? »."
         ),
         "fieldShare": "Accès au modèle",
         "shareSearchPlaceholder": "ID DL ou nom complet (au moins 2 caractères)",
@@ -530,18 +529,25 @@ _USER_MODELS_STRINGS = {
         "colAccess": "Accès",
         "accessPublic": "tous",
         "accessPrivate": "moi seul",
+        "accessPending": "en modération",
+        "accessRejected": "refusé",
         "accessUnit": "utilis.",
         "allModelsTitle": "Tous les modèles",
         "allModelsIntro": (
-            "Ce tableau n'est visible que par le superutilisateur. Vous pouvez "
-            "modifier la visibilité et la liste d'accès ; les adresses, clés et "
-            "réglages des modèles d'autres utilisateurs ne sont pas affichés."
+            "Ce tableau n'est visible que par le superutilisateur. Le "
+            "fournisseur et l'ID du modèle sont affichés ; vous pouvez "
+            "modifier la liste d'accès direct et approuver les demandes de "
+            "publication. Les adresses, clés et réglages des modèles d'autres "
+            "utilisateurs ne sont pas affichés."
         ),
         "colOwner": "Propriétaire",
         "colManage": "Gestion",
         "accessPanelTitle": "Accès au modèle",
         "btnSaveAccess": "Enregistrer l'accès",
         "btnAccess": "Gérer l'accès",
+        "btnApprove": "Approuver",
+        "btnReject": "Refuser",
+        "btnRevoke": "Retirer la publication",
         "msgAccessSaved": "Accès enregistré.",
         "errAccessSave": "Impossible d'enregistrer l'accès",
         "errSearch": "Échec de la recherche",

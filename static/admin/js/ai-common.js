@@ -67,12 +67,26 @@ function setAiState(partial) {
     } catch (e) {}
 }
 
+// Откуда взялось текущее значение #select: 'manual' (пользователь выбрал сам),
+// 'auto' (авто-выбор лучшей по языку/скоупу) или null — кука ещё не прочитана.
+// В ai_state пишется как modelAuto: 0 — ручной выбор (сохраняется при смене
+// языка/темы), 1 — автоматический (пересчитывается под новый скоуп). Старая
+// кука без флага трактуется как ручной выбор.
+var modelChoiceSource = null;
+// Синтетический change при авто-выборе не должен сделать выбор «ручным».
+var _modelAutoSelecting = false;
+// Авто-выбор запросили до restoreSelections (статистика пришла раньше onload).
+var _pendingScopeDefault = false;
+
 // Сохранение всех селектов в куку ai_state (по значениям, не индексам)
 function saveSelections() {
     try {
         var st = {};
         var el;
-        if ((el = document.getElementById('select'))) st.model = el.value;
+        if ((el = document.getElementById('select'))) {
+            st.model = el.value;
+            st.modelAuto = modelChoiceSource === 'manual' ? 0 : 1;
+        }
         if ((el = document.getElementById('selectLang')) && el.selectedIndex >= 0) {
             st.lang = el.options[el.selectedIndex].getAttribute('language');
         }
@@ -112,14 +126,19 @@ function findSelectOptionByModel(sel, stored) {
 }
 
 function restoreSelections() {
+    var modelRestored = false;
     try {
         var st = getAiState();
-        if (st.model) {
+        // modelAuto === 1 → модель выбрана автоматически: НЕ восстанавливаем её
+        // (дефолт пересчитается по восстановленному языку/скоупу). Явный 0 или
+        // старая кука без флага — ручной выбор, возвращаем как раньше.
+        if (st.model && st.modelAuto !== 1) {
             var sel = document.getElementById('select');
             if (sel) {
                 var opt = findSelectOptionByModel(sel, st.model);
                 if (opt) {
                     sel.selectedIndex = opt.index;
+                    modelRestored = true;
                     if (opt.value !== st.model) {
                         // Селект не совпал с сохранённым — переписываем куку валидным
                         // ключом (лечение переименований прошло у всех сразу).
@@ -138,6 +157,14 @@ function restoreSelections() {
             if (voiceControls && voiceControls.style.display === 'none') toggleVoiceControls();
         }
     } catch (e) {}
+    if (modelChoiceSource === null) {
+        modelChoiceSource = modelRestored ? 'manual' : 'auto';
+    }
+    // Авто-выбор откладывался, пока кука не прочитана, — досчитываем теперь.
+    if (_pendingScopeDefault) {
+        _pendingScopeDefault = false;
+        selectBestModelForScope();
+    }
 }
 
 // Сохранение при изменении любого селекта
@@ -199,7 +226,20 @@ function aiThinkEnabled() {
 }
 
 function initSelectionPersistence() {
+    // Ручной выбор модели — единственное место, где modelChoiceSource
+    // становится 'manual' (авто-выбор диспатчит change под флагом
+    // _modelAutoSelecting). Регистрируем ДО общих слушателей сохранения и
+    // сохраняем сами — иначе modelAuto успел бы записаться как «авто».
+    var modelSelect = document.getElementById('select');
+    if (modelSelect) {
+        modelSelect.addEventListener('change', function () {
+            if (_modelAutoSelecting) return;
+            modelChoiceSource = 'manual';
+            saveSelections();
+        });
+    }
     for (var i = 0; i < PERSISTED_SELECT_IDS.length; i++) {
+        if (PERSISTED_SELECT_IDS[i] === 'select') continue;
         var el = document.getElementById(PERSISTED_SELECT_IDS[i]);
         if (el) {
             el.addEventListener('change', saveSelections);
@@ -217,24 +257,24 @@ function initSelectionPersistence() {
     var langSel = document.getElementById('selectLang');
     if (langSel) langSel.addEventListener('change', applySharedUiLanguageTexts);
     applySharedUiLanguageTexts();
-    // Сортировка «Все модели» по статистике прогонов /arm/solve/ — общий
-    // механизм для всех трёх страниц чата (base_chat.html).
-    initModelSortSelector();
+    // Цифры статистики и сортировка каталога по качеству — общий механизм
+    // всех клиентских страниц (base_chat.html).
+    initModelSelectorStats();
     initThinkToggle();
 }
 
-// === Сортировка селектора моделей по статистике прогонов /arm/solve/ ===
-// Статистика (среднее время, % решённых) приходит с сервера в data-атрибутах
-// опций (model_health.get_available_model_options — легаси-глобальный скоуп,
-// заморожен). Управляет порядком ТОЛЬКО optgroup «Все модели» —
-// favorite-first контракт («Часто используемые» сверху) не трогаем. Режим
-// хранится в localStorage: серверу он не нужен. ЦИФРОВЫЕ суффиксы с этими
-// атрибутами не связаны — на задачных страницах они из скоуп-статистики
-// (см. scopedModelOptionStats/updateScopedModelStats), в чате их нет вовсе.
-// Модели без данных всегда в конце (внутри группы — исходный алфавитный
-// порядок). В закрытом селекторе — чистые названия; суффикс статистики
-// («66␣·␣12», целые без единиц — они на заголовке группы) виден только в развёрнутом списке (см. initModelSortSelector).
-var MODEL_SORT_KEY = 'ai_model_sort_mode';
+// === Статистика и порядок селектора моделей ===
+// Каталог — ОДИН плоский список, сервер сортирует его по убыванию качества
+// (ai/views.py::_build_model_selector). Цифры (% решённых · среднее время)
+// показываются ТОЛЬКО когда статистика реально относится к выбранному скоупу:
+//   чат (нет #selectProgLng) — цифр нет вообще;
+//   «Реши задачу»/«В чём ошибка»: язык выбран и по нему есть данные — цифры
+//   языка; язык+тема с данными — цифры темы; данных по скоупу нет — цифр нет.
+// Ранжирование (порядок и авто-выбор) отделено от показа: без скоуп-данных
+// падаем на глобальный агрегат из data-атрибутов
+// (model_health.get_available_model_options: языковые scoped-строки).
+// Модели без данных — в конце, по алфавиту. Цифры видны только в раскрытом
+// списке; закрытый селектор показывает чистые названия.
 
 function modelOptionStats(opt) {
     var avg = parseFloat(opt.getAttribute('data-avg-seconds'));
@@ -246,16 +286,16 @@ function modelOptionStats(opt) {
 }
 
 // === Скоуп-статистика задачных страниц (язык[, тема]) ===
-// Цифры суффикса «% · сек» на «Реши задачу»/«В чём ошибка» берутся из ответа
+// Цифры и порядок моделей на «Реши задачу»/«В чём ошибка» берутся из ответа
 // /ai/api/model-stats/?progLng=&topic= — статистика по ВЫБРАННОМУ языку и
-// теме (map по model_key), а НЕ из data-атрибутов опций (те заморожены и
-// остались только сортировке #selectModelSort). Скоуп не выбран (язык пуст)
-// → общие данные по ВСЕМ темам и языкам (API отдаёт агрегат scoped-строк);
-// нет данных по скоупу → суффикса нет («ничего», без фолбэка на глобальное).
-// Гонка ответов: применяется только ответ последнего запрошенного скоупа.
+// теме (map по model_key), а не из глобальных data-атрибутов. Гонка ответов:
+// применяется только ответ последнего запрошенного скоупа.
 var scopedStatsMap = null;
 var scopedStatsScope = null;
-// Хук перезамера ширины селекта моделей (ставится в initModelSortSelector):
+// 'scoped' — цифры и порядок по выбранному скоупу;
+// 'global' — цифр нет, порядок и авто-выбор по глобальному агрегату.
+var scopedStatsMode = 'global';
+// Хук перезамера ширины селекта моделей (ставится в initModelSelectorStats):
 // пришедшая статистика меняет ширину раскрытого списка — резервируем заново.
 var _reserveModelSelectWidthHook = null;
 
@@ -267,19 +307,61 @@ function scopedModelOptionStats(opt) {
     };
 }
 
+// Есть ли хоть один непустой показатель в карте скоупа.
+function scopeStatsHaveData(map) {
+    if (!map) return false;
+    for (var key in map) {
+        if (!map.hasOwnProperty(key)) continue;
+        var s = map[key];
+        if (s && (s.avg_seconds != null || s.percent_solved != null)) return true;
+    }
+    return false;
+}
+
+// Цифры ДЛЯ ПОКАЗА в раскрытом списке: только фактический скоуп. В чате и в
+// глобальном фолбэке цифр нет (пользователь просил не светить их без языка).
+function displayStatsForOption(opt) {
+    if (!document.getElementById('selectProgLng')) {
+        return { avgSeconds: null, percentSolved: null };
+    }
+    if (scopedStatsMode !== 'scoped') {
+        return { avgSeconds: null, percentSolved: null };
+    }
+    return scopedModelOptionStats(opt);
+}
+
+// Цифры ДЛЯ РАНЖИРОВАНИЯ/АВТО-ВЫБОРА: скоуп, если он дал данные, иначе
+// глобальный агрегат сервера (в чате — только он; сортировка там не зовётся).
+function rankingStatsForOption(opt) {
+    if (document.getElementById('selectProgLng') && scopedStatsMode === 'scoped') {
+        return scopedModelOptionStats(opt);
+    }
+    return modelOptionStats(opt);
+}
+
 function updateScopedModelStats() {
     var progLng = document.getElementById('selectProgLng');
-    if (!progLng) return;  // чат: суффиксов нет вовсе (см. modelSuffixesEnabled)
+    if (!progLng) return;  // чат: цифр нет вовсе, дефолт — серверный
     var languageId = progLng.value;
     var theme = document.getElementById('selectTheme');
     var topicId = theme ? theme.value : '';
     scopedStatsScope = languageId + '|' + topicId;
-    // Язык не выбран → общий скоуп: запрос без progLng, API вернёт агрегат
-    // по всем темам и языкам (пустой languageId не шлём — битый/отсутствующий
-    // progLng сервер считает отсутствующим).
     var scope = scopedStatsScope;
+
+    // Язык не выбран: запроса нет. Глобальный режим — цифры скрыты, порядок и
+    // дефолт по глобальному агрегату (лучшая по всем языкам, где есть данные).
+    if (!languageId) {
+        scopedStatsMap = null;
+        scopedStatsMode = 'global';
+        stripModelOptionSuffixes();
+        sortModelOptionsByStats();
+        selectBestModelForScope();
+        if (_reserveModelSelectWidthHook) _reserveModelSelectWidthHook();
+        return;
+    }
+
     var url = new URL('/ai/api/model-stats/', window.location.origin);
-    if (languageId) url.searchParams.set('progLng', languageId);
+    url.searchParams.set('progLng', languageId);
     if (topicId) url.searchParams.set('topic', topicId);
     fetch(url.toString())
         .then(function (response) {
@@ -289,34 +371,58 @@ function updateScopedModelStats() {
         .then(function (data) {
             // Гонка: применяем ответ, только если скоуп запроса ещё актуален.
             if (scopedStatsScope !== scope) return;
-            scopedStatsMap = (data && data.stats) || null;
+            var map = (data && data.stats) || {};
+            var hasData = scopeStatsHaveData(map);
+            scopedStatsMap = hasData ? map : null;
+            scopedStatsMode = hasData ? 'scoped' : 'global';
             // Суффиксы строятся заново на открытии списка — снимаем старые.
             stripModelOptionSuffixes();
+            // Тема без статистики: порядок и выбор не трогаем — иначе список
+            // прыгал бы на глобальную сортировку при каждом выборе темы.
+            if (hasData || !topicId) sortModelOptionsByStats();
+            // Дефолт считается по ЯЗЫКУ. При выбранной теме авто-выбор не
+            // делаем: остаётся лучшая модель языка (цифры темы — только показ).
+            if (!topicId) selectBestModelForScope();
             if (_reserveModelSelectWidthHook) _reserveModelSelectWidthHook();
         })
         .catch(function (error) {
             console.error('Error fetching model stats:', error);
             if (scopedStatsScope !== scope) return;
             scopedStatsMap = null;
+            scopedStatsMode = 'global';
             stripModelOptionSuffixes();
+            if (!topicId) {
+                sortModelOptionsByStats();
+                selectBestModelForScope();
+            }
+            if (_reserveModelSelectWidthHook) _reserveModelSelectWidthHook();
         });
 }
 
-// Человекочитаемый суффикс названия: «Model X␣␣␣␣66␣·␣␣12» — только целые
-// числа (десятичные отбрасываются), данные прижаты вправо и выровнены в один
-// столбец. Знаки единиц (% и сек) в строках НЕ повторяются — они показаны
-// один раз в заголовке группы, выровненные над колонками (см.
-// applyModelGroupUnitLabels).
-// Название добивается неразрывными пробелами до пиксельной ширины самого
-// длинного названия (замер canvas'ом шрифтом селекта; canvas недоступен →
-// добивание посимвольно), процент и время — до одинаковой символьной ширины
-// блока (выравнивание вправо). Если данных по модели нет вообще — суффикс
-// не показывается (голое название); если есть только один показатель —
-// показывается только он на своём месте в общем столбце. Идемпотентен:
-// базовое название кешируется в data-base-title при первом проходе.
+// Человекочитаемый суффикс названия: «Model X    95% · 12с» — только целые
+// числа (десятичные отбрасываются). Процент и секунды — ДВЕ независимые
+// колонки, прижатые вправо; единицы (% и с) стоят в КАЖДОЙ строке сразу за
+// числом, поэтому их глифы тоже образуют ровные столбцы. В заголовке группы
+// единиц нет: подпись браузер рендерит отдельной строкой с другим отступом,
+// и над колонками опций она строго не встаёт.
+//
+// Выравнивание — по ПИКСЕЛЯМ, не по числу символов: в пропорциональном
+// шрифте пробел (~3.5px) и цифра (~7.9px) разной ширины, поэтому «95» и
+// «100» съезжали, а секунды уезжали вслед за процентом. Добиваем строку
+// набором пробелов разной ширины (figure space = ширина цифры, NBSP, thin,
+// hair) до вычисленной колонки — точность меньше пикселя. Canvas недоступен
+// → посимвольный запасной вариант (приблизительно). Если данных по модели
+// нет вообще — суффикс не показывается (голое название); если есть только
+// один показатель — показывается только он, но колонки не смещаются.
+// Идемпотентен: базовое название кешируется в data-base-title.
 
 // Неразрывный пробел: обычные пробелы в <option> схлопываются, NBSP — нет.
 var NBSP = '\u00A0';
+// Figure space (U+2007) по метрике равен цифре; thin/hair — для остатка
+// меньше пробела.
+var FIGURE_SPACE = '\u2007';
+var THIN_SPACE = '\u2009';
+var HAIR_SPACE = '\u200A';
 // Минимальный зазор название → столбец данных, в NBSP.
 var MODEL_STAT_GAP_MIN = 3;
 
@@ -325,9 +431,8 @@ var _statMeasureCtx = null;
 // Ширина текста шрифтом селекта моделей — для пиксельного добивания названий
 // до одного столбца. Canvas measureText даёт метрику того же шрифта, которым
 // рендерятся опции. Недоступен → 0, вызывающий код падает на посимвольный
-// запасной вариант. weightOverride — для заголовков групп (браузер рендерит
-// их жирным).
-function measureStatText(text, weightOverride) {
+// запасной вариант.
+function measureStatText(text) {
     var select = document.getElementById('select');
     if (!select || !document.createElement) return 0;
     if (!_statMeasureCtx) {
@@ -336,13 +441,43 @@ function measureStatText(text, weightOverride) {
     }
     if (!_statMeasureCtx) return 0;
     var style = window.getComputedStyle(select);
-    _statMeasureCtx.font = [style.fontStyle, weightOverride || style.fontWeight, style.fontSize, style.fontFamily].join(' ');
+    _statMeasureCtx.font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(' ');
     return _statMeasureCtx.measureText(text).width;
 }
 
-// n неразрывных пробелов (n <= 0 → пусто).
+// n неразрывных пробелов (посимвольный запасной вариант, n <= 0 → пусто).
 function padStat(n) {
     return n > 0 ? new Array(n + 1).join(NBSP) : '';
+}
+
+// Доступные пробельные символы и их ширина — от широких к узким. Figure
+// space в большинстве шрифтов равен ширине цифры, поэтому цифровые колонки
+// добиваются им без остатка; hair space закрывает остаток меньше пробела.
+function statSpaceUnits() {
+    var units = [];
+    [FIGURE_SPACE, NBSP, THIN_SPACE, HAIR_SPACE].forEach(function (ch) {
+        var w = measureStatText(ch);
+        if (w > 0.05) units.push({ ch: ch, w: w });
+    });
+    units.sort(function (a, b) { return b.w - a.w; });
+    return units;
+}
+
+// Пробелы ровно на targetPx с точностью меньше ширины самого узкого из
+// доступных пробелов. Отрицательное/нулевое → пусто.
+function padStatPx(targetPx, units) {
+    if (!(targetPx > 0) || !units.length) return '';
+    var out = '';
+    var remaining = targetPx;
+    for (var i = 0; i < units.length; i++) {
+        var w = units[i].w;
+        var count = Math.floor(remaining / w + 1e-6);
+        if (count > 0) {
+            out += new Array(count + 1).join(units[i].ch);
+            remaining -= count * w;
+        }
+    }
+    return out;
 }
 
 // Вешает суффикс на одну опцию по заранее посчитанным колонкам (cols).
@@ -350,111 +485,106 @@ function padStat(n) {
 // по ВСЕМ опциям селекта, иначе каждая строка выравнивалась бы сама по себе.
 // Столбец данных стартует от maxTitleW + минимальный зазор — иначе у самой
 // длинной строки зазор был бы, а у остальных нет, и столбец съезжал бы.
-// В строках только целые числа; единицы (% и сек) живут в заголовке группы.
+// Процент и секунды прижаты вправо; единицы идут сразу за числом.
 function applyModelOptionSuffix(item, cols) {
     var text = item.title;
-    if (item.hasStats) {
-        var gap = cols.nbspW > 0
-            ? Math.max(MODEL_STAT_GAP_MIN, Math.round((cols.maxTitleW + MODEL_STAT_GAP_MIN * cols.nbspW - item.titleW) / cols.nbspW))
-            : Math.max(MODEL_STAT_GAP_MIN, cols.maxTitleLen + MODEL_STAT_GAP_MIN - item.title.length);
-        text += padStat(gap);
+    if (!item.hasStats) {
+        item.opt.textContent = text;
+        return;
+    }
+    if (cols.pixels) {
+        text += padStatPx(cols.dataStart - item.titleW, cols.units);
         if (item.pct) {
-            text += padStat(cols.pctW - item.pct.length) + item.pct;
+            text += padStatPx(cols.pctW - item.pctW, cols.units) + item.pct + '%';
+        } else if (item.sec) {
+            // Процента нет — молча резервируем его колонку (цифры + «%» +
+            // разделитель), чтобы секунды стояли в общем столбце.
+            text += padStatPx(cols.pctW + cols.pctUnitW + cols.sepW, cols.units);
         }
         if (item.sec) {
-            text += (item.pct ? NBSP + '·' + NBSP : '') + padStat(cols.secW - item.sec.length) + item.sec;
+            if (item.pct) text += cols.separator;
+            text += padStatPx(cols.secW - item.secW, cols.units) + item.sec + cols.secUnit;
+        }
+    } else {
+        // Запасной посимвольный вариант (canvas/шрифт недоступны).
+        text += padStat(Math.max(MODEL_STAT_GAP_MIN, cols.maxTitleLen + MODEL_STAT_GAP_MIN - item.title.length));
+        if (item.pct) {
+            text += padStat(cols.pctChars - item.pct.length) + item.pct + '%';
+        } else if (item.sec) {
+            text += padStat(cols.pctChars + 4);  // «%» и « · »
+        }
+        if (item.sec) {
+            if (item.pct) text += NBSP + '·' + NBSP;
+            text += padStat(cols.secChars - item.sec.length) + item.sec + cols.secUnit;
         }
     }
     item.opt.textContent = text;
 }
 
-// Единицы (% и сек) показываются ОДИН РАЗ — в заголовках групп селектора,
-// и ВЫРОВНЕНЫ над колонками показателей: подпись группы добивается NBSP до
-// начала столбца данных (тот же пиксельный замер, что у строк; заголовок
-// браузер рендерит жирным — меряем жирным), знак «%» прижат вправо внутри
-// колонки процента, «с» — внутри колонки секунд, разделитель «·» стоит на
-// колонке строк. Базовые подписи групп кешируются в data-base-label;
-// суффикс вешается только группам, у которых есть строки со статистикой,
-// и снимается при закрытии списка (stripModelOptionSuffixes) — закрытый
-// селектор и поиск группы по подписи («Все модели») не ломаются.
-function applyModelGroupUnitLabels(modelSelect, items, cols) {
-    var secUnit = getUiString('statSeconds', 'с');
-    Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup'), function (group) {
-        if (!group.hasAttribute('data-base-label')) {
-            group.setAttribute('data-base-label', group.label);
-        }
-        var base = group.getAttribute('data-base-label');
-        var hasStats = items.some(function (item) { return item.opt.parentElement === group; });
-        if (!hasStats) {
-            if (group.label !== base) group.label = base;
-            return;
-        }
-        var gap;
-        if (cols.nbspW > 0) {
-            var colStart = cols.maxTitleW + MODEL_STAT_GAP_MIN * cols.nbspW;
-            var labelW = measureStatText(base, 'bold');
-            // Минимум 1 NBSP (не лепить знак к подписи), но приоритет —
-            // точное попадание над колонкой, поэтому без MODEL_STAT_GAP_MIN.
-            gap = Math.max(1, Math.round((colStart - labelW) / cols.nbspW));
-        } else {
-            gap = Math.max(1, cols.maxTitleLen + MODEL_STAT_GAP_MIN - base.length);
-        }
-        var next = base + padStat(gap)
-            + padStat(Math.max(0, cols.pctW - 1)) + '%'
-            + NBSP + '·' + NBSP
-            + padStat(Math.max(0, cols.secW - secUnit.length)) + secUnit;
-        if (group.label !== next) group.label = next;
-    });
-}
-
-// Суффиксы показываются ТОЛЬКО на задачных страницах («Реши задачу»/
-// «В чём ошибка» — наличие #selectProgLng): чат их не показывает вовсе
-// (пользовательского решения 2026-10). Гейт единый (DRY): все вызовы —
-// открытие списка, замер ширины — на чате превращаются в no-op.
+// Суффиксы доступны на всех клиентских страницах, где есть селектор моделей;
+// цифры появляются только у фактического скоупа (см. displayStatsForOption).
 function modelSuffixesEnabled() {
-    return !!document.getElementById('selectProgLng');
+    return !!document.getElementById('select');
 }
 
-// Суффикс статистики вешается на ВСЕ опции селектора (включая «Часто
-// используемые»), а пересортировка — только на optgroup «Все модели».
-// Два прохода: первый собирает по всем опциям ширины колонок (название,
-// процент, время), второй вешает суффиксы — тогда данные во всех строках
-// стоят ровно в одном столбце, а не «каждая строка сама по себе». Цифры
-// — скоуп-статистика выбранного языка[, темы] (scopedModelOptionStats).
+// Суффикс статистики вешается на все опции селектора, у которых есть данные
+// скоупа. Два прохода: первый собирает по всем опциям ширины колонок
+// (название, процент, время), второй вешает суффиксы — тогда данные во всех
+// строках стоят ровно в одном столбце, а не «каждая строка сама по себе».
 function applyModelOptionSuffixes() {
     var modelSelect = document.getElementById('select');
     if (!modelSelect || !modelSuffixesEnabled()) return;
     var items = [];
-    var cols = { maxTitleW: 0, maxTitleLen: 0, pctW: 0, secW: 0, nbspW: 0 };
+    var cols = {
+        maxTitleW: 0, maxTitleLen: 0,
+        pctW: 0, pctChars: 0, secW: 0, secChars: 0,
+        nbspW: 0, pixels: false, units: [],
+    };
     Array.prototype.forEach.call(modelSelect.options, function (opt) {
         if (!opt.value) return;  // заглушка «Сегодня нет доступных моделей» — не модель
         if (!opt.hasAttribute('data-base-title')) {
             opt.setAttribute('data-base-title', opt.textContent.trim());
         }
         var title = opt.getAttribute('data-base-title');
-        var stats = scopedModelOptionStats(opt);
+        var stats = displayStatsForOption(opt);
         var item = {
             opt: opt,
             title: title,
-            // Десятичные отбрасываем (Math.floor) — в строках целые числа;
-            // знаки единиц (% и сек) не дублируем в каждой строке.
+            // Десятичные отбрасываем (Math.floor) — в строках целые числа.
             pct: stats.percentSolved !== null ? String(Math.floor(stats.percentSolved)) : '',
             sec: stats.avgSeconds !== null ? String(Math.floor(stats.avgSeconds)) : '',
         };
         item.hasStats = !!(item.pct || item.sec);
-        if (item.hasStats) {
-            item.titleW = measureStatText(title);
-            cols.maxTitleW = Math.max(cols.maxTitleW, item.titleW);
-            cols.maxTitleLen = Math.max(cols.maxTitleLen, title.length);
-            if (item.pct) cols.pctW = Math.max(cols.pctW, item.pct.length);
-            if (item.sec) cols.secW = Math.max(cols.secW, item.sec.length);
-            items.push(item);
+        if (!item.hasStats) return;
+        item.titleW = measureStatText(title);
+        item.pctW = item.pct ? measureStatText(item.pct) : 0;
+        item.secW = item.sec ? measureStatText(item.sec) : 0;
+        cols.maxTitleW = Math.max(cols.maxTitleW, item.titleW);
+        cols.maxTitleLen = Math.max(cols.maxTitleLen, title.length);
+        if (item.pct) {
+            cols.pctW = Math.max(cols.pctW, item.pctW);
+            cols.pctChars = Math.max(cols.pctChars, item.pct.length);
         }
+        if (item.sec) {
+            cols.secW = Math.max(cols.secW, item.secW);
+            cols.secChars = Math.max(cols.secChars, item.sec.length);
+        }
+        items.push(item);
     });
     if (!items.length) return;
-    cols.nbspW = measureStatText(NBSP) || measureStatText(' ');
+    cols.units = statSpaceUnits();
+    cols.nbspW = measureStatText(NBSP);
+    cols.secUnit = getUiString('statSeconds', 'с');
+    // Пиксельная раскладка возможна, только если шрифт замеряется и есть
+    // хотя бы один пробельный символ ненулевой ширины.
+    cols.pixels = cols.units.length > 0 && cols.nbspW > 0;
+    if (cols.pixels) {
+        cols.dataStart = cols.maxTitleW + MODEL_STAT_GAP_MIN * cols.nbspW;
+        cols.pctUnitW = measureStatText('%');
+        cols.separator = NBSP + '·' + NBSP;
+        cols.sepW = measureStatText(cols.separator);
+    }
     items.forEach(function (item) { applyModelOptionSuffix(item, cols); });
-    applyModelGroupUnitLabels(modelSelect, items, cols);
 }
 
 // Обратное применение: закрытый селектор показывает чистые названия
@@ -467,106 +597,136 @@ function stripModelOptionSuffixes() {
         var base = opt.getAttribute('data-base-title');
         if (base !== null) opt.textContent = base;
     });
-    // Заголовки групп: вернуть базовые подписи без суффикса единиц (%·с) —
-    // закрытый селектор показывает чистые названия.
-    Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup[data-base-label]'), function (group) {
-        group.label = group.getAttribute('data-base-label');
-    });
 }
 
-function sortModelOptions(mode) {
+// Пересортировка КАТАЛОГА (прямые <option> в #select) по убыванию качества.
+// Формула — та же, что в ai/services/model_stats.py::quality_scores:
+// 0.5 * (1 - avg/maxAvg) + 0.5 * (pct/100); модели без данных — в конце,
+// по алфавиту. Личные optgroup'ы (mine/shared/public) не трогаем — они
+// остаются ниже каталога. Выбранная модель сохраняется по значению.
+function sortModelOptionsByStats() {
     var modelSelect = document.getElementById('select');
-    // data-ai-group="all" (base_chat.html): локализованный label текстом
-    // селектить нельзя — подпись переведена и меняется на смене языка.
-    var group = modelSelect && modelSelect.querySelector('optgroup[data-ai-group="all"]');
-    if (!group || !group.children.length) return;
-
+    if (!modelSelect) return;
     var selectedValue = modelSelect.value;
-    var opts = Array.prototype.slice.call(group.children);
 
-    if (mode !== 'default') {
-        var withStats = [];
-        var withoutStats = [];
-        opts.forEach(function(opt) {
-            var s = modelOptionStats(opt);
-            (s.avgSeconds !== null || s.percentSolved !== null ? withStats : withoutStats).push(opt);
-        });
+    var catalog = Array.prototype.filter.call(modelSelect.children, function (el) {
+        return el.tagName === 'OPTION' && el.value;
+    });
+    if (catalog.length < 2) return;
 
-        var maxAvg = 0;
-        withStats.forEach(function(opt) {
-            var s = modelOptionStats(opt);
-            if (s.avgSeconds !== null && s.avgSeconds > maxAvg) maxAvg = s.avgSeconds;
-        });
+    var maxAvg = 0;
+    catalog.forEach(function (opt) {
+        var s = rankingStatsForOption(opt);
+        if (s.avgSeconds !== null && s.avgSeconds > maxAvg) maxAvg = s.avgSeconds;
+    });
 
-        var score;
-        if (mode === 'speed') {
-            // Быстрее (меньше avg) — выше.
-            score = function(opt) {
-                var s = modelOptionStats(opt);
-                return s.avgSeconds === null ? -Infinity : -s.avgSeconds;
-            };
-        } else if (mode === 'accuracy') {
-            score = function(opt) {
-                var s = modelOptionStats(opt);
-                return s.percentSolved === null ? -Infinity : s.percentSolved;
-            };
-        } else {
-            // both: равный вклад скорости и точности, оба нормированы в [0..1].
-            // Модель без одного из показателей не получает «половину» оценки.
-            score = function(opt) {
-                var s = modelOptionStats(opt);
-                var total = 0;
-                if (s.avgSeconds !== null && maxAvg > 0) total += 0.5 * (1 - s.avgSeconds / maxAvg);
-                if (s.percentSolved !== null) total += 0.5 * (s.percentSolved / 100);
-                return total;
-            };
-        }
-
-        withStats.sort(function(a, b) { return score(b) - score(a); });
-        opts = withStats.concat(withoutStats);
+    function scoreOf(opt) {
+        var s = rankingStatsForOption(opt);
+        if (s.avgSeconds === null && s.percentSolved === null) return null;
+        var total = 0;
+        if (s.avgSeconds !== null && maxAvg > 0) total += 0.5 * (1 - s.avgSeconds / maxAvg);
+        if (s.percentSolved !== null) total += 0.5 * (s.percentSolved / 100);
+        return total;
     }
 
-    // Перезаписываем группу в новом порядке (selected сохраняем по значению).
-    group.innerHTML = '';
-    opts.forEach(function(opt) { group.appendChild(opt); });
+    function titleOf(opt) {
+        return (opt.getAttribute('data-base-title') || opt.textContent || '')
+            .trim().toLowerCase();
+    }
+
+    function compare(a, b) {
+        var sa = scoreOf(a);
+        var sb = scoreOf(b);
+        if (sa === null && sb !== null) return 1;
+        if (sa !== null && sb === null) return -1;
+        if (sa !== null && sb !== null && sa !== sb) return sb - sa;
+        var ta = titleOf(a);
+        var tb = titleOf(b);
+        if (ta !== tb) return ta < tb ? -1 : 1;
+        if (a.value === b.value) return 0;
+        return a.value < b.value ? -1 : 1;
+    }
+
+    catalog.sort(compare);
+    // Вставляем каталог перед первым optgroup (личные модели остаются ниже);
+    // если групп нет — в конец.
+    var firstGroup = null;
+    for (var i = 0; i < modelSelect.children.length; i++) {
+        if (modelSelect.children[i].tagName === 'OPTGROUP') {
+            firstGroup = modelSelect.children[i];
+            break;
+        }
+    }
+    catalog.forEach(function (opt) { modelSelect.insertBefore(opt, firstGroup); });
     if (selectedValue) modelSelect.value = selectedValue;
 }
 
-function initModelSortSelector() {
-    var modelSelect = document.getElementById('select');
-    var sortSelect = document.getElementById('selectModelSort');
-    if (!modelSelect || !sortSelect) return;
-    // data-ai-group="all" — см. sortModelOptions (label локализован).
-    var group = modelSelect.querySelector('optgroup[data-ai-group="all"]');
-    if (!group || !group.children.length) {
-        sortSelect.style.display = 'none';
+// Авто-выбор лучшей модели текущего скоупа (при смене языка / без языка).
+// Ручной выбор пользователя неприкосновенен; при неясной куке (onload ещё
+// не прочитал её) решение откладывается до restoreSelections.
+function selectBestModelForScope() {
+    if (modelChoiceSource === 'manual') return;
+    if (modelChoiceSource === null) {
+        _pendingScopeDefault = true;
         return;
     }
+    var modelSelect = document.getElementById('select');
+    if (!modelSelect) return;
+    var catalog = Array.prototype.filter.call(modelSelect.children, function (el) {
+        return el.tagName === 'OPTION' && el.value;
+    });
+    if (!catalog.length) return;
 
-    // Подписи режимов сортировки переводятся вместе с остальным UI при смене
-    // selectLang (общий слушатель здесь — все три страницы чата). Суффиксы
-    // статистики не трогаем: они живут только в открытом списке и строятся
-    // заново при каждом открытии (applyModelOptionSuffixes), так что свежая
-    // локализация подхватывается сама.
-    function updateSortLabels() {
-        var labels = {
-            'default': getUiString('sortDefault', 'Порядок: по алфавиту'),
-            'speed': getUiString('sortSpeed', 'Порядок: по скорости'),
-            'accuracy': getUiString('sortAccuracy', 'Порядок: по точности'),
-            'both': getUiString('sortBoth', 'Порядок: скорость + точность'),
-        };
-        Array.prototype.forEach.call(sortSelect.options, function(o) {
-            if (labels[o.value]) o.textContent = labels[o.value];
-        });
+    var maxAvg = 0;
+    catalog.forEach(function (opt) {
+        var s = rankingStatsForOption(opt);
+        if (s.avgSeconds !== null && s.avgSeconds > maxAvg) maxAvg = s.avgSeconds;
+    });
+
+    var bestValue = '';
+    var bestScore = null;
+    catalog.forEach(function (opt) {
+        var s = rankingStatsForOption(opt);
+        if (s.avgSeconds === null && s.percentSolved === null) return;
+        var score = 0;
+        if (s.avgSeconds !== null && maxAvg > 0) score += 0.5 * (1 - s.avgSeconds / maxAvg);
+        if (s.percentSolved !== null) score += 0.5 * (s.percentSolved / 100);
+        if (bestScore === null || score > bestScore) {
+            bestScore = score;
+            bestValue = opt.value;
+        }
+    });
+    // Данных нет вовсе — остаётся серверный дефолт (DEFAULT_MODEL_KEY/первая).
+    if (!bestValue) return;
+    modelChoiceSource = 'auto';
+    if (modelSelect.value === bestValue) return;
+
+    _modelAutoSelecting = true;
+    try {
+        modelSelect.value = bestValue;
+        // Синтетический change обновляет зависимые виджеты (think, PDF,
+        // лимиты), но не делает выбор ручным (гейт по _modelAutoSelecting).
+        modelSelect.dispatchEvent(new Event('change'));
+    } finally {
+        _modelAutoSelecting = false;
     }
+    saveSelections();
+}
 
-    // Статистика («Model␣66␣·␣12», целые; единицы — на заголовке группы)
-    // показывается ТОЛЬКО в развёрнутом
-    // списке: нативный select рендерит опции в момент открытия, поэтому
-    // суффиксы вешаем на открытие (mousedown — мышь, keydown — клавиатура:
-    // Enter/Space/стрелки/F4) и снимаем при закрытии (change/blur/Escape).
-    // Закрытый селектор показывает чистые названия — одинаковая компактная
-    // ширина на всех трёх страницах.
+function initModelSelectorStats() {
+    var modelSelect = document.getElementById('select');
+    if (!modelSelect) return;
+
+    // Слушатели статистики вешаются ВСЕГДА, даже если какая-то optgroup
+    // пуста/отсутствует: пустой каталог не должен выключать цифры у
+    // оставшихся опций (раньше ранний return по отсутствующему элементу
+    // сортировки выключал цифры везде).
+    // Цифры статистики (целые; единицы «%» и «с» — в каждой строке) видны
+    // ТОЛЬКО в развёрнутом списке: нативный select рендерит опции в момент
+    // открытия, поэтому суффиксы вешаем на открытие (mousedown — мышь,
+    // keydown — клавиатура: Enter/Space/стрелки/F4) и снимаем при закрытии
+    // (change/blur/Escape). Закрытый селектор показывает чистые названия —
+    // одинаковая компактная ширина на всех страницах.
     modelSelect.addEventListener('pointerdown', applyModelOptionSuffixes);
     modelSelect.addEventListener('mousedown', applyModelOptionSuffixes);
     modelSelect.addEventListener('keydown', function (event) {
@@ -620,24 +780,10 @@ function initModelSortSelector() {
         resizeTimer = setTimeout(reserveModelSelectWidth, 200);
     });
 
-    var saved = 'default';
-    try { saved = localStorage.getItem(MODEL_SORT_KEY) || 'default'; } catch (e) {}
-    if (!Array.prototype.some.call(sortSelect.options, function(o) { return o.value === saved; })) {
-        saved = 'default';
-    }
-    sortSelect.value = saved;
-    sortSelect.addEventListener('change', function() {
-        try { localStorage.setItem(MODEL_SORT_KEY, sortSelect.value); } catch (e) {}
-        sortModelOptions(sortSelect.value);
-    });
     var selectLangEl = document.getElementById('selectLang');
     if (selectLangEl) {
-        selectLangEl.addEventListener('change', function () {
-            updateSortLabels();
-            reserveModelSelectWidth();
-        });
+        selectLangEl.addEventListener('change', reserveModelSelectWidth);
     }
-    updateSortLabels();
 }
 
 // === Selectors: programming language / topic / prompt (shared by find-error & solve-problem) ===
@@ -1492,11 +1638,7 @@ var localization = {
         docsClose: "Закрыть",
         docsLoadError: "Не удалось загрузить инструкцию",
         docsTranslationFailed: "Перевод на этот язык временно недоступен — показана русская версия.",
-        // Селектор сортировки моделей (base_chat.html) + суффикс статистики.
-        sortDefault: "Порядок: по алфавиту",
-        sortSpeed: "Порядок: по скорости",
-        sortAccuracy: "Порядок: по точности",
-        sortBoth: "Порядок: скорость + точность",
+        // Суффикс статистики моделей (раскрытый список селектора).
         statSeconds: "с",
         // Маркер shared-промпта — JS-зеркало _SHARED_PROMPT_PREFIX из ai/i18n.py.
         sharedPrefix: "[Общий]",
@@ -1584,9 +1726,6 @@ var localization = {
         // aria-метки, алерты отправки (см. applySharedUiLanguageTexts).
         showLabel: "Показать:",
         hideLabel: "Скрыть:",
-        favoritesGroup: "Часто используемые",
-        allModelsGroup: "Все модели",
-        experimentalModelsGroup: "Экспериментальные модели",
         myModelsGroup: "Мои модели",
         sharedModelsGroup: "Доступные мне",
         publicModelsGroup: "Публичные",
@@ -1635,11 +1774,7 @@ var localization = {
         docsClose: "Close",
         docsLoadError: "Failed to load the guide",
         docsTranslationFailed: "This language is temporarily unavailable — showing the Russian version.",
-        // Model sort selector (base_chat.html) + stats suffix.
-        sortDefault: "Order: alphabetical",
-        sortSpeed: "Order: by speed",
-        sortAccuracy: "Order: by accuracy",
-        sortBoth: "Order: speed + accuracy",
+        // Model stats suffix (expanded selector list).
         statSeconds: "s",
         // Mirror of _SHARED_PROMPT_PREFIX from ai/i18n.py.
         sharedPrefix: "[Shared]",
@@ -1725,9 +1860,6 @@ var localization = {
         // model-optgroup labels, docs modal, aria labels, send alerts.
         showLabel: "Show:",
         hideLabel: "Hide:",
-        favoritesGroup: "Frequently used",
-        allModelsGroup: "All models",
-        experimentalModelsGroup: "Experimental models",
         myModelsGroup: "My models",
         sharedModelsGroup: "Shared with me",
         publicModelsGroup: "Public",
@@ -1776,11 +1908,7 @@ var localization = {
         docsClose: "Fermer",
         docsLoadError: "Impossible de charger le guide",
         docsTranslationFailed: "Cette langue est temporairement indisponible — la version russe est affichée.",
-        // Sélecteur de tri des modèles (base_chat.html) + suffixe statistiques.
-        sortDefault: "Ordre : alphabétique",
-        sortSpeed: "Ordre : par vitesse",
-        sortAccuracy: "Ordre : par précision",
-        sortBoth: "Ordre : vitesse + précision",
+        // Suffixe statistiques des modèles (liste déroulante ouverte).
         statSeconds: "s",
         // Miroir de _SHARED_PROMPT_PREFIX de ai/i18n.py.
         sharedPrefix: "[Partagé]",
@@ -1866,9 +1994,6 @@ var localization = {
         // accordéon, libellés des groupes de modèles, modale d'aide, aria, alertes.
         showLabel: "Afficher :",
         hideLabel: "Masquer :",
-        favoritesGroup: "Fréquemment utilisés",
-        allModelsGroup: "Tous les modèles",
-        experimentalModelsGroup: "Modèles expérimentaux",
         myModelsGroup: "Mes modèles",
         sharedModelsGroup: "Partagés avec moi",
         publicModelsGroup: "Publics",
@@ -2801,9 +2926,6 @@ function applySharedUiLanguageTexts() {
     var modelSelect = document.getElementById('select');
     if (modelSelect) {
         var groupLabels = {
-            favorites: getUiString('favoritesGroup', 'Часто используемые'),
-            all: getUiString('allModelsGroup', 'Все модели'),
-            experimental: getUiString('experimentalModelsGroup', 'Экспериментальные модели'),
             mine: getUiString('myModelsGroup', 'Мои модели'),
             shared: getUiString('sharedModelsGroup', 'Доступные мне'),
             public: getUiString('publicModelsGroup', 'Публичные')
@@ -2811,9 +2933,6 @@ function applySharedUiLanguageTexts() {
         Array.prototype.forEach.call(modelSelect.querySelectorAll('optgroup[data-ai-group]'), function (group) {
             var label = groupLabels[group.getAttribute('data-ai-group')];
             if (!label) return;
-            // data-base-label — база суффиксов статистики (applyModelGroupUnitLabels);
-            // меняем оба поля согласованно, иначе суффикс прицепится к старой подписи.
-            group.setAttribute('data-base-label', label);
             group.label = label;
         });
         var noModelsOpt = modelSelect.querySelector('option[value=""]');

@@ -37,6 +37,7 @@ from .arm import (
     admin_arm_solve_result_download_view,
     admin_arm_solve_result_body_view,
 )
+from .check_ai import admin_check_ai_view
 from .dl_api_requests import (
     admin_dl_api_request_create_view,
     admin_dl_api_request_update_view,
@@ -171,6 +172,7 @@ def get_ai_admin_urls():
         path("prompts/lab/export/", ai_admin_site.admin_view(admin_prompt_lab_export_view), name="ai_prompt_lab_export"),
         path("prompts/lab/result/<int:result_id>/body/", ai_admin_site.admin_view(admin_prompt_lab_result_body_view), name="ai_prompt_lab_result_body"),
         path("prompts/lab/", ai_admin_site.admin_view(admin_prompt_lab_view), name="ai_prompt_lab"),
+        path("check-ai/", ai_admin_site.admin_view(admin_check_ai_view), name="ai_check_ai"),
         path("ai-groups/<int:group_id>/save/", ai_admin_site.admin_view(admin_access_group_save_view), name="ai_access_group_save"),
         path("ai-groups/<int:group_id>/delete/", ai_admin_site.admin_view(admin_access_group_delete_view), name="ai_access_group_delete"),
         path("ai-groups/<int:group_id>/members/search/", ai_admin_site.admin_view(admin_access_group_member_search_view), name="ai_access_group_member_search"),
