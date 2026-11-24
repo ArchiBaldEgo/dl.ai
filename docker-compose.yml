@@ -1,4 +1,5 @@
-name: "dl_ai${PROJ_PREFIX}"
+# docker-compose.yml
+name: "dlai${PROJ_PREFIX}"
 services:
   # Основной сервис 
   web:
@@ -21,8 +22,7 @@ services:
     # «Page crashed!» в worker/logs/application.log). 3.5g хватает на одновременные
     # генерации web Kimi + web DeepSeek; хост имеет 6.4ГБ (4.4ГБ доступно).
     shm_size: 512m
-    mem_limit: 2g
-    memswap_limit: 2g
+    mem_limit: 3.5g
     oom_kill_disable: false
     volumes:
       - .:/app
@@ -71,7 +71,7 @@ services:
     networks:
       - shared-network
 
-  Планировщик под самим основным сервисом
+  # Планировщик под самим основным сервисом
   scheduler:
     build: .
     container_name: "dl_ai_web_scheduler${PROJ_PREFIX}"
