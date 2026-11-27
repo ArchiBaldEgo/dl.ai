@@ -20,8 +20,8 @@ from .check_ai import CheckAiForm, SHORT_INPUT_WORDS, check_name_field
 from .permissions import can_access_check_ai, is_superuser_user
 from .site import ai_admin_site
 
-MAX_BATCH_FILES = 100
-MAX_BATCH_MIB = 40
+MAX_BATCH_FILES = 1000
+MAX_BATCH_MIB = 200
 PROGRAM_EXTENSIONS = frozenset("""
     .asm .bas .c .cc .clj .cljc .cljs .cob .coffee .cpp .cs .cxx .d .dart .dpr .el .erl .ex
     .exs .f .f90 .fs .fsx .go .h .hh .hpp .hs .hxx .java .jl .js .jsx .kts .kt
@@ -33,7 +33,7 @@ Status = AICheckBatchFile.Status
 
 
 class BatchCheckFileForm(CheckAiForm):
-    max_input_mib = 2
+    max_input_mib = 5
 
 
 class BatchCheckForm(forms.Form):
