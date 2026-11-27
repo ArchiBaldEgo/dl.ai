@@ -55,6 +55,7 @@ SCOPES = (
     "admin_check_ai",
     "admin_check_ai_batch",
     "admin_check_ai_protocol",
+    "admin_check_ai_suspicious",
 )
 
 # USER_SCOPES: юзерские scope'ы с «общими» шагами (язык/модель/переключатель);

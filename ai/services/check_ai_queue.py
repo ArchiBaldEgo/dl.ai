@@ -2,11 +2,12 @@
 
 import logging
 import threading
-from time import sleep
+from time import monotonic, sleep
 
 from django.db import close_old_connections, connection
 from django.utils import timezone
 
+from ..check_ai_results import BATCH_CHECK_TIMEOUT_SECONDS
 from ..models import AICheckBatchFile
 from .pangram_client import PangramError, check_text
 
@@ -29,17 +30,20 @@ def _process_file():
 
     item.status = Status.RUNNING
     item.save(update_fields=["status"])
+    started = monotonic()
     try:
-        item.result.update(check_text(item.source_text, wait_seconds=120))
+        item.result.update(check_text(item.source_text, wait_seconds=BATCH_CHECK_TIMEOUT_SECONDS))
         item.status = Status.DONE
     except PangramError as exc:
         item.status, item.error = Status.ERROR, str(exc)
     except Exception:
         logger.exception("Ошибка проверки файла %s", item.pk)
         item.status, item.error = Status.ERROR, "Не удалось проверить файл."
-    item.source_text = ""
+    item.duration_seconds = monotonic() - started
+    if not item.is_suspicious:
+        item.source_text = ""
     item.checked_at = timezone.now()
-    item.save(update_fields=["source_text", "checked_at", "status", "result", "error"])
+    item.save(update_fields=["source_text", "checked_at", "duration_seconds", "status", "result", "error"])
     return True
 
 

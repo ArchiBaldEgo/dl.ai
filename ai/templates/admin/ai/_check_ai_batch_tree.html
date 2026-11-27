@@ -1,24 +1,41 @@
+{% load check_ai %}
 {% for child in node.folders %}
   <details data-path="{{ child.path }}/">
     <summary>
-      {{ child.name }} · средний ИИ {% if child.count %}{{ child.average|floatformat:1 }}%{% else %}—{% endif %}
+      {{ child.name }} ·
+      {% if suspicious_only %}
+        <span class="check-ai-score--high">подозрительных программ: {{ child.visible_count }}</span>
+      {% elif child.average != None %}
+        <span class="{% if child.average > 10 %}check-ai-score--high{% elif child.average > 0 %}check-ai-score--medium{% else %}check-ai-score--low{% endif %}">средний ИИ {{ child.average|floatformat:1 }}%</span>
+      {% else %}
+        средний ИИ —
+      {% endif %}
+      · {% if child.duration_average != None %}
+        <span{% if child.duration_estimated %} title="Включает оценки по отметкам завершения"{% endif %}>
+          среднее время {% if child.duration_estimated %}≈ {% endif %}{{ child.duration_average|check_ai_duration }}
+          · общее время {% if child.duration_estimated %}≈ {% endif %}{{ child.duration_sum|check_ai_duration }}
+        </span>
+      {% else %}замеров времени нет{% endif %}
     </summary>
-    {% include "admin/ai/_check_ai_batch_tree.html" with node=child only %}
+    {% include "admin/ai/_check_ai_batch_tree.html" with node=child suspicious_only=suspicious_only protocol_view=protocol_view only %}
   </details>
 {% endfor %}
 {% for item in node.files %}
-  <details data-path="{{ item.relative_path }}">
-    <summary>
-      {{ item.filename }} · {% if item.status == "done" %}ИИ {{ item.result.ai_percent }}%{% else %}{{ item.get_status_display }}{% endif %}
-    </summary>
-    <div class="check-ai-file-detail">
+  <div class="check-ai-program" data-path="{{ item.relative_path }}">
+    <span title="{{ item.relative_path }}">{% include "admin/ai/_check_ai_program_name.html" with item=item label=item.filename only %}</span>
+    <span>
       {% if item.status == "done" %}
-        {% include "admin/ai/_check_ai_scores.html" with result=item.result only %}
+        {% include "admin/ai/_check_ai_scores.html" with result=item.result compact=True protocol_view=protocol_view only %}
       {% elif item.error %}
         {{ item.error }}
       {% else %}
         {{ item.get_status_display }}
       {% endif %}
-    </div>
-  </details>
+    </span>
+    {% if item.estimated_duration != None %}
+      <span title="Оценка по времени завершения двух соседних проверок">≈ {{ item.estimated_duration|check_ai_duration }}</span>
+    {% else %}
+      <span title="Длительность проверки">{{ item.duration_seconds|check_ai_duration }}</span>
+    {% endif %}
+  </div>
 {% endfor %}

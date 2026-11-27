@@ -2,6 +2,7 @@
 
 import codecs
 import re
+from time import monotonic
 
 from django import forms
 from django.db import transaction
@@ -10,6 +11,7 @@ from django.template.response import TemplateResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
+from ..check_ai_results import is_suspicious_result
 from ..constants import CHECK_AI_TITLE
 from ..models import AICheckBatch, AICheckBatchFile
 from ..services.pangram_client import PangramError, check_text
@@ -109,8 +111,7 @@ class CheckAiForm(forms.Form):
         return data
 
 
-def _record_single_check(user, data, started_at, result, error):
-    # Одиночная проверка сразу записывается с итогом. Текст в базе не нужен.
+def _record_single_check(user, data, started_at, duration_seconds, result, error):
     status = AICheckBatchFile.Status.DONE if result is not None else AICheckBatchFile.Status.ERROR
     with transaction.atomic():
         check = AICheckBatch.objects.create(
@@ -124,8 +125,10 @@ def _record_single_check(user, data, started_at, result, error):
             relative_path=data["file"].name if data["file"] else "Текст решения",
             status=status,
             result=result or {},
+            source_text=data["text"] if result and is_suspicious_result(result) else "",
             error=error or "",
             checked_at=timezone.now(),
+            duration_seconds=duration_seconds,
         )
 
 
@@ -143,12 +146,13 @@ def admin_check_ai_view(request):
         if form.is_valid():
             text = form.cleaned_data["text"]
             started_at = timezone.now()
+            started = monotonic()
             try:
                 result = check_text(text)
                 result["short_input"] = len(text.split()) < SHORT_INPUT_WORDS
             except PangramError as exc:
                 status, error = exc.status, str(exc)
-            _record_single_check(request.user, form.cleaned_data, started_at, result, error)
+            _record_single_check(request.user, form.cleaned_data, started_at, monotonic() - started, result, error)
         else:
             status = 400
 

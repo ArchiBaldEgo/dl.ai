@@ -1,18 +1,7 @@
-{% if items %}
-  <dl class="check-ai-protocol-programs">
-    {% for item in items %}
-      <dt>{{ item.relative_path }}</dt>
-      <dd>
-        {% if item.status == "done" %}
-          {% include "admin/ai/_check_ai_scores.html" with result=item.result compact=True only %}
-        {% elif item.error %}
-          {{ item.error }}
-        {% else %}
-          {{ item.get_status_display }}
-        {% endif %}
-      </dd>
-    {% endfor %}
-  </dl>
+{% if tree.folders or tree.files %}
+  <div class="check-ai-result-tree">
+    {% include "admin/ai/_check_ai_batch_tree.html" with node=tree suspicious_only=suspicious_only protocol_view=True only %}
+  </div>
 {% else %}
-  <p>В пакете нет программ.</p>
+  <p>{% if suspicious_only %}В пакете нет подозрительных программ.{% else %}В пакете нет программ.{% endif %}</p>
 {% endif %}

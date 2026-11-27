@@ -1,0 +1,13 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=13">
+{% endblock %}
+
+{% block content %}
+  <p><a href="{% url 'ai_check_ai_suspicious' %}">Подозрительные программы</a></p>
+  <p>{{ item.relative_path }}</p>
+  <pre class="check-ai-source"><code>{{ item.source_text }}</code></pre>
+{% endblock %}

@@ -3,7 +3,7 @@
 
 {% block extrastyle %}
   {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=12">
+  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=15">
 {% endblock %}
 
 {% block extrahead %}
@@ -18,11 +18,12 @@
     <colgroup>
       <col class="check-ai-protocol-date">
       <col class="check-ai-protocol-checker">
-      <col>
+      <col class="check-ai-protocol-title">
       <col class="check-ai-protocol-result">
+      <col class="check-ai-protocol-duration">
     </colgroup>
     <thead>
-      <tr><th title="Дата и время запуска">Дата и время</th><th>Кто проверил</th><th>Название проверки</th><th>Результат проверки</th></tr>
+      <tr><th title="Дата и время запуска">Дата и время</th><th>Кто проверил</th><th>Название проверки</th><th>Результат проверки</th><th>Время проверки</th></tr>
     </thead>
     <tbody>
       {% for check in page_obj %}
@@ -33,40 +34,61 @@
           <td>
             <div class="check-ai-protocol-name">
               <button type="button" class="button" aria-expanded="false" aria-controls="check-ai-programs-{{ check.pk }}"
-                      data-programs-url="{% url 'ai_check_ai_batch_detail' check.pk %}?fragment=programs">Развернуть</button>
+                      data-programs-url="{% url 'ai_check_ai_batch_detail' check.pk %}?fragment=programs{% if suspicious_only %}&amp;suspicious=1{% endif %}">Развернуть</button>
               <a href="{% url 'ai_check_ai_batch_detail' check.pk %}" title="{{ check.display_name }}">{{ check.display_name }}</a>
             </div>
           </td>
+          {% if suspicious_only %}
+          <td class="check-ai-score--high">{% if check.average_ai != None %}Средний ИИ {{ check.average_ai|floatformat:1 }}% · {% endif %}файлов {{ check.suspicious_count }}</td>
+          {% else %}
           <td{% if check.processed_count == check.file_count and check.average_ai != None %}
             class="{{ check.average_human|check_ai_score_class }}"
             {% if check.average_human != None %}title="Цвет по средней доле с участием ИИ"{% endif %}{% endif %}>
             {% if check.processed_count == check.file_count and check.average_ai != None %}
-              Средний ИИ {{ check.average_ai|floatformat:1 }}% · файлов {{ check.file_count }}
-            {% else %}
-              Обработано {{ check.processed_count }} из {{ check.file_count }}
+              Средний ИИ {{ check.average_ai|floatformat:1 }}% ·
             {% endif %}
-            {% if check.error_count %} · ошибок {{ check.error_count }}{% endif %}
+            файлов {{ check.file_count }}
           </td>
+          {% endif %}
+          {% if check.estimated_average_duration != None %}
+            <td title="По оценкам длительности отдельных проверок">
+              среднее ≈ {{ check.estimated_average_duration|check_ai_duration }} · общее ≈ {{ check.estimated_total_duration|check_ai_duration }}
+            </td>
+          {% elif check.average_duration != None %}
+            <td title="По файлам пакета с замером длительности">
+              среднее {{ check.average_duration|check_ai_duration }} · общее {{ check.total_duration|check_ai_duration }}
+            </td>
+          {% else %}
+            <td>нет замера</td>
+          {% endif %}
           {% else %}
             {% with item=check.single_files.0 %}
-              <td title="{{ check.display_name }} · {{ item.relative_path }}">{{ check.display_name }} <small class="check-ai-protocol-type">· Одиночная</small></td>
+              <td title="{{ check.display_name }} · {{ item.relative_path }}">
+                {% include "admin/ai/_check_ai_program_name.html" with item=item label=check.display_name only %}
+                <small class="check-ai-protocol-type">· Одиночная</small>
+              </td>
               <td{% if item.error %} title="{{ item.error }}"{% endif %}>
                 {% if item.status == "done" %}
-                  {% include "admin/ai/_check_ai_scores.html" with result=item.result compact=True only %}
+                  {% include "admin/ai/_check_ai_scores.html" with result=item.result compact=True protocol_view=True single=True only %}
                 {% else %}
                   {{ item.error }}
                 {% endif %}
               </td>
+              {% if item.estimated_duration != None %}
+                <td title="Оценка по времени запуска и завершения">≈ {{ item.estimated_duration|check_ai_duration }}</td>
+              {% else %}
+                <td>{{ item.duration_seconds|check_ai_duration }}</td>
+              {% endif %}
             {% endwith %}
           {% endif %}
         </tr>
         {% if check.kind == "batch" %}
           <tr id="check-ai-programs-{{ check.pk }}" class="check-ai-protocol-detail" hidden>
-            <td colspan="4" data-programs-content></td>
+            <td colspan="5" data-programs-content></td>
           </tr>
         {% endif %}
       {% empty %}
-        <tr><td colspan="4">Проверок пока нет.</td></tr>
+        <tr><td colspan="5">{% if suspicious_only %}Подозрительных программ пока нет.{% else %}Проверок пока нет.{% endif %}</td></tr>
       {% endfor %}
     </tbody>
   </table>

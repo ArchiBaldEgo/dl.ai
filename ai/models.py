@@ -4,6 +4,7 @@ from django.db import models
 from django.db.models.functions import Upper
 from django.utils import timezone
 
+from .check_ai_results import is_suspicious_result
 from .i18n import get_localized_name, get_localized_text
 
 """Модели данных AI-приложения.
@@ -80,6 +81,7 @@ class AICheckBatchFile(models.Model):
     result = models.JSONField(default=dict, blank=True)
     error = models.TextField(blank=True)
     checked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    duration_seconds = models.FloatField(null=True, blank=True)
 
     class Meta:
         indexes = [models.Index(fields=["status", "id"], name="ai_check_file_queue_idx")]
@@ -87,6 +89,10 @@ class AICheckBatchFile(models.Model):
     @property
     def filename(self):
         return self.relative_path.rsplit("/", 1)[-1]
+
+    @property
+    def is_suspicious(self):
+        return self.status == self.Status.DONE and is_suspicious_result(self.result)
 
 
 class ExternalDLAccount(models.Model):

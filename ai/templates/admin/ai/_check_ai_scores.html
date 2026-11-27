@@ -1,6 +1,6 @@
 {% load check_ai %}
 <span class="{% if result.short_input %}check-ai-score--medium{% else %}{{ result.human_percent|check_ai_score_class }}{% endif %}">
-  ИИ {{ result.ai_percent }}% · с помощью ИИ {{ result.ai_assisted_percent }}% · человек {{ result.human_percent }}%
+  ИИ {{ result.ai_percent }}%{% if not protocol_view %} · с помощью ИИ {{ result.ai_assisted_percent }}% · человек {{ result.human_percent }}%{% endif %}{% if single %} · 1 файл{% endif %}
   {% if result.short_input %}
     {% if compact %} · <small title="Мало данных для вывода об авторстве.">Мало данных</small>
     {% else %}<br><small>Мало данных для вывода об авторстве.</small>{% endif %}

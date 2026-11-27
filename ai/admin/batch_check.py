@@ -1,12 +1,13 @@
 """Загрузка пакетов, дерево результатов и протокол проверок."""
 
+from itertools import groupby
 from pathlib import PurePosixPath
 from uuid import uuid4
 
 from django import forms
 from django.core.paginator import Paginator
 from django.db import transaction
-from django.db.models import Avg, Count, FloatField, Prefetch, Q
+from django.db.models import Avg, Count, FloatField, Prefetch, Q, Sum
 from django.db.models.fields.json import KeyTextTransform
 from django.db.models.functions import Cast
 from django.http import HttpResponseForbidden, HttpResponseNotFound, JsonResponse
@@ -15,6 +16,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods
 
+from ..check_ai_results import BATCH_CHECK_TIMEOUT_SECONDS, SUSPICIOUS_AI_PERCENT
 from ..models import AICheckBatch, AICheckBatchFile
 from .check_ai import CheckAiForm, SHORT_INPUT_WORDS, check_name_field
 from .permissions import can_access_check_ai, is_superuser_user
@@ -59,6 +61,20 @@ def _checks_for(user):
     if is_superuser_user(user):
         return AICheckBatch.objects.all()
     return AICheckBatch.objects.filter(created_by=user)
+
+
+def _display_files(files):
+    return files.defer("source_text").annotate(source_available=~Q(source_text=""))
+
+
+def _suspicious_files():
+    return AICheckBatchFile.objects.alias(
+        human_percent=Cast(KeyTextTransform("human_percent", "result"), FloatField()),
+    ).filter(
+        Q(result__short_input=False) | Q(result__short_input__isnull=True),
+        status=Status.DONE,
+        human_percent__range=(0, 100 - SUSPICIOUS_AI_PERCENT),
+    )
 
 
 def _is_program(path):
@@ -167,29 +183,88 @@ def admin_check_ai_batch_view(request):
 
 
 def _empty_folder(name="", path=""):
-    return {"name": name, "path": path, "folders": {}, "files": [], "count": 0, "sum": 0, "average": None}
+    return {
+        "name": name, "path": path, "folders": {}, "files": [], "visible_count": 0,
+        "count": 0, "sum": 0,
+        "duration_count": 0, "duration_sum": 0, "duration_estimated": False,
+    }
 
 
-def _result_tree(items):
+def _legacy_file_durations(items):
+    """Оценивает интервалы между соседними успешными проверками в старом пакете."""
+    estimates = {}
+    previous = None
+    for item in sorted(items, key=lambda file: file.pk):
+        if (
+            item.duration_seconds is None
+            and item.status == Status.DONE and item.checked_at is not None
+            and previous is not None and previous.pk + 1 == item.pk
+            and previous.status == Status.DONE and previous.checked_at is not None
+        ):
+            interval = (item.checked_at - previous.checked_at).total_seconds()
+            if 0 < interval <= BATCH_CHECK_TIMEOUT_SECONDS:
+                estimates[item.pk] = interval
+        previous = item
+    return estimates
+
+
+def _result_tree(items, *, suspicious_only=False):
     root = _empty_folder()
+    estimates = _legacy_file_durations(items)
     for item in items:
         folder = root
+        visible = not suspicious_only or item.is_suspicious
+        ai_percent = item.result.get("ai_percent") if item.status == Status.DONE else None
+        item.estimated_duration = estimates.get(item.pk)
+        duration = item.duration_seconds if item.duration_seconds is not None else item.estimated_duration
         parts = item.relative_path.split("/")
         for index, part in enumerate(parts[:-1]):
             if part not in folder["folders"]:
                 folder["folders"][part] = _empty_folder(part, "/".join(parts[:index + 1]))
             folder = folder["folders"][part]
-            if item.status == Status.DONE:
+            folder["visible_count"] += visible
+            if ai_percent is not None:
                 folder["count"] += 1
-                folder["sum"] += item.result["ai_percent"]
-                folder["average"] = folder["sum"] / folder["count"]
-        folder["files"].append(item)
+                folder["sum"] += ai_percent
+            if duration is not None:
+                folder["duration_count"] += 1
+                folder["duration_sum"] += duration
+                folder["duration_estimated"] |= item.estimated_duration is not None
+        if visible:
+            folder["files"].append(item)
     # В шаблон отдаём списки: папка с именем «values» не должна затенить метод dict.values.
     folders = [root]
     for folder in folders:
-        folder["folders"] = list(folder["folders"].values())
+        folder["folders"] = [child for child in folder["folders"].values() if child["visible_count"]]
+        folder["average"] = folder["sum"] / folder["count"] if folder["count"] else None
+        folder["duration_average"] = (
+            folder["duration_sum"] / folder["duration_count"] if folder["duration_count"] else None
+        )
         folders.extend(folder["folders"])
     return root
+
+
+def _add_protocol_duration_estimates(page):
+    legacy_batches = {}
+    for check in page:
+        if check.kind == AICheckBatch.Kind.SINGLE:
+            for item in check.single_files:
+                if item.duration_seconds is None and item.status == Status.DONE and item.checked_at is not None:
+                    elapsed = (item.checked_at - check.created_at).total_seconds()
+                    if elapsed >= 0:
+                        item.estimated_duration = elapsed
+        elif check.average_duration is None and check.processed_count == check.file_count:
+            legacy_batches[check.pk] = check
+
+    items = AICheckBatchFile.objects.filter(batch_id__in=legacy_batches).only(
+        "id", "batch_id", "status", "checked_at", "duration_seconds",
+    ).order_by("batch_id", "id")
+    for batch_id, files in groupby(items.iterator(), key=lambda file: file.batch_id):
+        estimates = _legacy_file_durations(files)
+        if estimates:
+            check = legacy_batches[batch_id]
+            check.estimated_total_duration = sum(estimates.values())
+            check.estimated_average_duration = check.estimated_total_duration / len(estimates)
 
 
 @require_GET
@@ -199,9 +274,13 @@ def admin_check_ai_batch_detail_view(request, batch_id):
     batch = _checks_for(request.user).filter(pk=batch_id, kind=AICheckBatch.Kind.BATCH).first()
     if batch is None:
         return HttpResponseNotFound("Пакет проверки не найден.")
-    items = list(batch.files.defer("source_text").order_by("relative_path"))
+    items = list(_display_files(batch.files.all()).order_by("relative_path"))
     if request.GET.get("fragment") == "programs":
-        return TemplateResponse(request, "admin/ai/_check_ai_protocol_programs.html", {"items": items})
+        suspicious_only = request.GET.get("suspicious") == "1"
+        tree = _result_tree(items, suspicious_only=suspicious_only)
+        return TemplateResponse(request, "admin/ai/_check_ai_protocol_programs.html", {
+            "tree": tree, "suspicious_only": suspicious_only,
+        })
     finished = sum(item.checked_at is not None for item in items)
     context = {
         "batch": batch,
@@ -216,16 +295,34 @@ def admin_check_ai_batch_detail_view(request, batch_id):
 
 
 @require_GET
-def admin_check_ai_protocol_view(request):
+def admin_check_ai_source_view(request, file_id):
     if not can_access_check_ai(request):
         return HttpResponseForbidden("У вас нет доступа к проверке на ИИ.")
+    item = _suspicious_files().filter(pk=file_id, batch__in=_checks_for(request.user)).exclude(source_text="").first()
+    if item is None:
+        return HttpResponseNotFound("Сохранённый исходный код не найден.")
+    return TemplateResponse(request, "admin/ai/check_ai_source.html", {
+        **ai_admin_site.each_context(request),
+        "title": item.filename,
+        "item": item,
+    })
+
+
+@require_GET
+def admin_check_ai_protocol_view(request, suspicious_only=False):
+    if not can_access_check_ai(request):
+        return HttpResponseForbidden("У вас нет доступа к проверке на ИИ.")
+    score_filter = Q(files__status=Status.DONE)
+    if suspicious_only:
+        score_filter = Q(files__in=_suspicious_files().values("pk"))
     checks = _checks_for(request.user).annotate(
         file_count=Count("files"),
         processed_count=Count("files__checked_at"),
-        error_count=Count("files", filter=Q(files__status=Status.ERROR)),
+        average_duration=Avg("files__duration_seconds"),
+        total_duration=Sum("files__duration_seconds"),
         average_ai=Avg(
             Cast(KeyTextTransform("ai_percent", "files__result"), FloatField()),
-            filter=Q(files__status=Status.DONE),
+            filter=score_filter,
         ),
         average_human=Avg(
             Cast(KeyTextTransform("human_percent", "files__result"), FloatField()),
@@ -233,12 +330,17 @@ def admin_check_ai_protocol_view(request):
         ),
     ).prefetch_related(Prefetch(
         "files",
-        queryset=AICheckBatchFile.objects.filter(batch__kind=AICheckBatch.Kind.SINGLE).defer("source_text"),
+        queryset=_display_files(AICheckBatchFile.objects.filter(batch__kind=AICheckBatch.Kind.SINGLE)),
         to_attr="single_files",
     )).order_by("-created_at", "-id")
+    if suspicious_only:
+        checks = checks.annotate(suspicious_count=Count("files", filter=score_filter)).filter(suspicious_count__gt=0)
+    page = Paginator(checks, 50).get_page(request.GET.get("page"))
+    _add_protocol_duration_estimates(page)
     return TemplateResponse(request, "admin/ai/check_ai_protocol.html", {
         **ai_admin_site.each_context(request),
-        "title": "Протокол проверки на ИИ",
-        "check_ai_tab": "protocol",
-        "page_obj": Paginator(checks, 50).get_page(request.GET.get("page")),
+        "title": "Подозрительные программы" if suspicious_only else "Протокол проверки на ИИ",
+        "check_ai_tab": "suspicious" if suspicious_only else "protocol",
+        "suspicious_only": suspicious_only,
+        "page_obj": page,
     })

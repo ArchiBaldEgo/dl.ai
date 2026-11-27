@@ -41,6 +41,7 @@ from .batch_check import (
     admin_check_ai_batch_detail_view,
     admin_check_ai_batch_view,
     admin_check_ai_protocol_view,
+    admin_check_ai_source_view,
 )
 from .check_ai import admin_check_ai_view
 from .dl_api_requests import (
@@ -181,6 +182,8 @@ def get_ai_admin_urls():
         path("check-ai/batch/", ai_admin_site.admin_view(admin_check_ai_batch_view), name="ai_check_ai_batch"),
         path("check-ai/batch/<int:batch_id>/", ai_admin_site.admin_view(admin_check_ai_batch_detail_view), name="ai_check_ai_batch_detail"),
         path("check-ai/protocol/", ai_admin_site.admin_view(admin_check_ai_protocol_view), name="ai_check_ai_protocol"),
+        path("check-ai/suspicious/", ai_admin_site.admin_view(admin_check_ai_protocol_view), {"suspicious_only": True}, name="ai_check_ai_suspicious"),
+        path("check-ai/source/<int:file_id>/", ai_admin_site.admin_view(admin_check_ai_source_view), name="ai_check_ai_source"),
         path("ai-groups/<int:group_id>/save/", ai_admin_site.admin_view(admin_access_group_save_view), name="ai_access_group_save"),
         path("ai-groups/<int:group_id>/delete/", ai_admin_site.admin_view(admin_access_group_delete_view), name="ai_access_group_delete"),
         path("ai-groups/<int:group_id>/members/search/", ai_admin_site.admin_view(admin_access_group_member_search_view), name="ai_access_group_member_search"),
