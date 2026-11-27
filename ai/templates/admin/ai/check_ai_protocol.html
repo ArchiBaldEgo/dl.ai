@@ -1,9 +1,9 @@
 {% extends "admin/base_site.html" %}
-{% load static tz %}
+{% load check_ai static tz %}
 
 {% block extrastyle %}
   {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=10">
+  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=12">
 {% endblock %}
 
 {% block extrahead %}
@@ -37,7 +37,9 @@
               <a href="{% url 'ai_check_ai_batch_detail' check.pk %}" title="{{ check.display_name }}">{{ check.display_name }}</a>
             </div>
           </td>
-          <td>
+          <td{% if check.processed_count == check.file_count and check.average_ai != None %}
+            class="{{ check.average_human|check_ai_score_class }}"
+            {% if check.average_human != None %}title="Цвет по средней доле с участием ИИ"{% endif %}{% endif %}>
             {% if check.processed_count == check.file_count and check.average_ai != None %}
               Средний ИИ {{ check.average_ai|floatformat:1 }}% · файлов {{ check.file_count }}
             {% else %}

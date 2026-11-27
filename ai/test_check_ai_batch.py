@@ -5,7 +5,7 @@ from uuid import uuid4
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.template.loader import render_to_string
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
 
 from .admin.batch_check import (
@@ -15,6 +15,22 @@ from .admin.check_ai import admin_check_ai_view
 from .models import AICheckBatch, AICheckBatchFile
 from .services.check_ai_queue import process_next_file
 from .services.pangram_client import PangramError
+from .templatetags.check_ai import check_ai_score_class
+
+
+class CheckAiScoreTests(SimpleTestCase):
+    def test_color_boundaries_for_ai_involvement(self):
+        for share, expected in (
+            (None, ""),
+            (0, "check-ai-score--high"),
+            (40, "check-ai-score--high"),
+            (40.1, "check-ai-score--medium"),
+            (60, "check-ai-score--medium"),
+            (60.1, "check-ai-score--low"),
+            (100, "check-ai-score--low"),
+        ):
+            with self.subTest(share=share):
+                self.assertEqual(check_ai_score_class(share), expected)
 
 
 class CheckAiBatchTests(TestCase):
@@ -120,12 +136,12 @@ class CheckAiBatchTests(TestCase):
             checked_at=started,
             error="Ошибка проверки.",
         )
-        for index, score in enumerate([0.0, 80.0]):
+        for index, (ai_score, assisted, human) in enumerate([(0.0, 20.0, 80.0), (80.0, 0.0, 20.0)]):
             batch.files.create(
                 relative_path=f"Group/{index}.py",
                 status=AICheckBatchFile.Status.DONE,
                 checked_at=started,
-                result={"ai_percent": score},
+                result={"ai_percent": ai_score, "ai_assisted_percent": assisted, "human_percent": human},
             )
         stranger = get_user_model().objects.create_user(username="other")
         request = self.requests.get(reverse("ai_check_ai_batch_detail", args=[batch.pk]), {"fragment": "programs"})
@@ -135,6 +151,14 @@ class CheckAiBatchTests(TestCase):
         fragment = admin_check_ai_batch_detail_view(request, batch.pk).render()
         self.assertContains(fragment, "Group/main.py")
         self.assertContains(fragment, "Ошибка проверки.")
+        self.assertContains(
+            fragment, '<span class="check-ai-score--high">ИИ 80.0% · с помощью ИИ 0.0% · человек 20.0%</span>',
+            html=True,
+        )
+        self.assertContains(
+            fragment, '<span class="check-ai-score--low">ИИ 0.0% · с помощью ИИ 20.0% · человек 80.0%</span>',
+            html=True,
+        )
 
         request = self.requests.get(reverse("ai_check_ai_protocol"))
         request.session = {}
@@ -145,8 +169,12 @@ class CheckAiBatchTests(TestCase):
         response = admin_check_ai_protocol_view(request)
         self.assertEqual(len(response.context_data["page_obj"]), 1)
         self.assertContains(response.render(), ">Первая проверка</a>", count=1)
-        self.assertContains(response, "Средний ИИ 40.0% · файлов 3")
-        self.assertContains(response, "· ошибок 1")
+        self.assertContains(
+            response,
+            '<td class="check-ai-score--medium" title="Цвет по средней доле с участием ИИ">'
+            'Средний ИИ 40.0% · файлов 3 · ошибок 1</td>',
+            html=True,
+        )
         self.assertNotContains(response, "Group/main.py")
         self.assertContains(response, "<td>25.11.2026 00:30</td>")
 
@@ -171,11 +199,15 @@ class CheckAiBatchTests(TestCase):
     @patch("ai.admin.check_ai.check_text")
     def test_single_checks_are_named_and_saved_in_protocol(self, check_text, _single_access, _protocol_access):
         check_text.side_effect = [
-            {"ai_percent": 24.0, "ai_assisted_percent": 1.0, "human_percent": 75.0},
+            {"ai_percent": 0.0, "ai_assisted_percent": 0.0, "human_percent": 100.0},
+            {"ai_percent": 0.0, "ai_assisted_percent": 0.0, "human_percent": 100.0},
             PangramError(502, "Временная ошибка Pangram."),
         ]
         single_url = reverse("ai_check_ai") + "?format=json"
-        request = self.requests.post(single_url, {"text": "x = 1", "name": "  Одиночный пример  "})
+        request = self.requests.post(single_url, {"text": "x = 1\n" * 20, "name": "  Одиночный пример  "})
+        request.user = self.user
+        self.assertEqual(admin_check_ai_view(request).status_code, 200)
+        request = self.requests.post(single_url, {"text": "x = 1", "name": "Короткий пример"})
         request.user = self.user
         self.assertEqual(admin_check_ai_view(request).status_code, 200)
         request = self.requests.post(single_url, {"file": SimpleUploadedFile("example.py", b"x = 2")})
@@ -183,15 +215,25 @@ class CheckAiBatchTests(TestCase):
         self.assertEqual(admin_check_ai_view(request).status_code, 502)
 
         checks = list(AICheckBatch.objects.order_by("pk"))
-        self.assertEqual([item.kind for item in checks], [AICheckBatch.Kind.SINGLE] * 2)
+        self.assertEqual([item.kind for item in checks], [AICheckBatch.Kind.SINGLE] * 3)
         self.assertEqual(checks[0].display_name, "Одиночный пример")
-        self.assertEqual(checks[1].files.get().relative_path, "example.py")
+        self.assertEqual(checks[-1].files.get().relative_path, "example.py")
         self.assertFalse(AICheckBatchFile.objects.exclude(source_text="").exists())
         request = self.requests.get(reverse("ai_check_ai_protocol"))
         request.session = {}
         request.user = self.user
         response = admin_check_ai_protocol_view(request).render()
         self.assertContains(response, "Одиночный пример")
-        self.assertContains(response, "ИИ 24.0%")
+        self.assertContains(
+            response,
+            '<span class="check-ai-score--low">ИИ 0.0% · с помощью ИИ 0.0% · человек 100.0%</span>',
+            html=True,
+        )
+        self.assertContains(
+            response,
+            '<span class="check-ai-score--medium">ИИ 0.0% · с помощью ИИ 0.0% · человек 100.0% '
+            '· <small title="Мало данных для вывода об авторстве.">Мало данных</small></span>',
+            html=True,
+        )
         self.assertContains(response, "Временная ошибка Pangram.")
         self.assertNotContains(response, "data-programs-url")

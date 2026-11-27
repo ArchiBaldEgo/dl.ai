@@ -227,6 +227,10 @@ def admin_check_ai_protocol_view(request):
             Cast(KeyTextTransform("ai_percent", "files__result"), FloatField()),
             filter=Q(files__status=Status.DONE),
         ),
+        average_human=Avg(
+            Cast(KeyTextTransform("human_percent", "files__result"), FloatField()),
+            filter=Q(files__status=Status.DONE),
+        ),
     ).prefetch_related(Prefetch(
         "files",
         queryset=AICheckBatchFile.objects.filter(batch__kind=AICheckBatch.Kind.SINGLE).defer("source_text"),

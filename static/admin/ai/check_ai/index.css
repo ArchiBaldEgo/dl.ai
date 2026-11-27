@@ -63,6 +63,18 @@
     min-width: 55rem;
 }
 
+#check-ai-protocol .check-ai-score--low {
+    color: light-dark(#1b6e33, #71d894);
+}
+
+#check-ai-protocol .check-ai-score--medium {
+    color: light-dark(#805900, #f2c14e);
+}
+
+#check-ai-protocol .check-ai-score--high {
+    color: var(--error-fg);
+}
+
 #check-ai-protocol th,
 #check-ai-protocol td {
     white-space: nowrap !important;
