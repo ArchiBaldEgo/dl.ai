@@ -18,7 +18,9 @@ health-check / автопроверки, не дожидаясь 30-секунд
 from django.db.models.signals import m2m_changed, post_save, post_delete
 from django.dispatch import receiver
 
-from .models import (
+
+from ai.debug import not_debug_only 
+from ai.models import (
     AIAccessGroup,
     AIAdminGroupPermission,
     AIModelAvailability,
@@ -128,6 +130,17 @@ def _invalidate_last_update_date_cache(sender, **kwargs):
     # должны появиться сразу.
     cache.delete(UPDATE_AUTHORS_CACHE_KEY)
 
+
+# Запускается когда в дб добавляется новый UpdateLog
+@receiver(post_save, sender=UpdateLog)
+def _on_new_update_log(sender, instance, created, **kwargs):
+    if not created:
+        #   Вообще должно логироваться отдельно в спец. ошибки
+        # и отдаваться в таком случае на дебаггинг ибо так не должно быть
+        return
+    
+    from ai.admin.emails.funcs import send_update_log_email 
+    send_update_log_email(instance)
 
 @receiver(post_save, sender=AIModelAvailability)
 @receiver(post_delete, sender=AIModelAvailability)

@@ -262,4 +262,15 @@
   background: transparent;
   border-color: var(--aiwiz-border);
   color: var(--aiwiz-fg);
+
+  border-radius: 3px 3px 3px 3px;
+  border-color: var(--link-bg);
+  border: 2px solid var(--hairline-color);
+  background: var(--body-bg);
+  color: var(--link-bg);
+}
+
+#ai-wizard-restart:hover {
+  cursor: pointer;
+  color: var(--link-fg);
 }

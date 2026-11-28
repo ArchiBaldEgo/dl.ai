@@ -1,5 +1,10 @@
+# docker-compose.yml
+name: "dlai${PROJ_PREFIX}"
 services:
+  # Основной сервис 
   web:
+    container_name: "dl_ai_web${PROJ_PREFIX}"
+    
     build:
       context: .
       dockerfile: Dockerfile
@@ -11,7 +16,6 @@ services:
         # Puppeteer Chromium download needs the real corporate proxy.
         NPM_HTTP_PROXY: "${RUNTIME_HTTP_PROXY:-}"
         NPM_HTTPS_PROXY: "${RUNTIME_HTTPS_PROXY:-}"
-    container_name: dl_ai_web
     restart: unless-stopped
     # Chrome-боты Kimi k3-эры: idle-рендерер kimi.com ~0.7-1.0ГБ, на генерации +0.4-0.6ГБ
     # (жёсткое доказательство: 2g-LIMit ронял рендерер cgroup-OOM'ом на КАЖДОЙ отправке —
@@ -19,7 +23,6 @@ services:
     # генерации web Kimi + web DeepSeek; хост имеет 6.4ГБ (4.4ГБ доступно).
     shm_size: 512m
     mem_limit: 3.5g
-    memswap_limit: 3.5g
     oom_kill_disable: false
     volumes:
       - .:/app
@@ -28,7 +31,7 @@ services:
       # WebKimi/seed.js — раньше были два (WebDeepseek/ + WebKimi/) с
       # идентичным набором зависимостей.
       - WebPools_node_modules:/app/node_modules
-#      - WebPools_puppeteer_cache:/app/.puppeteer-cache
+      # - WebPools_puppeteer_cache:/app/.puppeteer-cache
       # Chrome для Puppeteer в ЛОКАЛЬНОЙ сборке не качается (install.js без
       # прокси висит навсегда — см. Dockerfile), поэтому /opt/puppeteer-runtime
       # в образе пуст и оба бот-пула падают на «Could not find Chrome». Отдаём
@@ -39,7 +42,7 @@ services:
       # копия не происходит.
       - ${HOME:-/root}/.cache/puppeteer:/host-puppeteer-cache:ro
     ports:
-      - "8000:8000"
+      - "${AI_WEB_PORT:-8000}:8000"
     env_file:
       - .env
     environment:
@@ -71,9 +74,19 @@ services:
     networks:
       - shared-network
 
+  # Планировщик под самим основным сервисом
+  scheduler:
+    build: .
+    container_name: "dl_ai_web_scheduler${PROJ_PREFIX}"
+    command: python manage.py scheduler
+    env_file: [.env]
+    depends_on: [db, redis]
+    restart: unless-stopped
+    networks: [shared-network]
+
   db:
     image: postgres:14
-    container_name: dl_ai_db
+    container_name: "dl_ai_db${PROJ_PREFIX}"
     # Без restart-политики db не поднимался следом за остальными после
     # перезагрузки WSL/хоста — web из-за этого циклился на migrate-retry.
     restart: unless-stopped
@@ -88,7 +101,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: dl_ai_redis
+    container_name: "dl_ai_redis${PROJ_PREFIX}"
     restart: unless-stopped
     volumes:
       - redis_data:/data
@@ -103,7 +116,7 @@ services:
 
   nginx:
     image: nginx:latest
-    container_name: dl_ai_nginx
+    container_name: "dl_ai_nginx${PROJ_PREFIX}"
     restart: unless-stopped
     ports:
       - "${AI_NGINX_BIND:-0.0.0.0}:${AI_NGINX_PORT:-8080}:80"
@@ -118,13 +131,13 @@ services:
 
 volumes:
   postgres_data:
-    name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}"
+    name: "${POSTGRES_VOLUME_NAME:-dlai_postgres_data}${PROJ_PREFIX}"
   redis_data:
-    name: "${REDIS_VOLUME_NAME:-dlai_redis_data}"
+    name: "${REDIS_VOLUME_NAME:-dlai_redis_data}${PROJ_PREFIX}"
   static_volume:
   WebPools_node_modules:
   WebPools_puppeteer_cache:
 
 networks:
   shared-network:
-    name: "${DOCKER_NETWORK_NAME:-dlai-network}"
+    name: "${DOCKER_NETWORK_NAME:-dlai-network}${PROJ_PREFIX}"

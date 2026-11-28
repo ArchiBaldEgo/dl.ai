@@ -3,3 +3,17 @@
 3. Поместить backup_runner.sh в scripts
 4. DOCX.md в docs
 5. dl-rest-api.json в docs и сделать dl-rest-api.md
+
+```
+Для updates с email.
+UpdateLog из models.py
+
+Под место добавления нового updateLog = UpdateLog добавить вызов
+if(updateLog.hidden == true):
+    email.send_email_message_dl("dolinsky@gsu.by", $"Новое обновление от ({updateLog.author})",
+$"""
+Обновление от {updateLog.commit_date}, автор - {updateLog.author}
+Описание: {updateLog.description}
+""")
+
+```

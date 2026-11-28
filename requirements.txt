@@ -48,3 +48,6 @@ imageio-ffmpeg
 deep-translator==1.11.4
 markdown==3.7
 pypdf==6.19.0
+# Scheduled events
+apscheduler==3.11.3
+tzlocal==5.4.5
