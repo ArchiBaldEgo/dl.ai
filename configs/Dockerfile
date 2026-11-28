@@ -139,4 +139,4 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 #   (миграции — по DEPLOY.md). until-цикл: depends_on дожидается только старта
 #   контейнера db, postgres может ещё не принимать соединения; после 30 попыток —
 #   громкий exit 1 без маскировки.
-CMD ["bash", "/app/configs/start_web.sh"]
+CMD ["bash", "/app/configs/web_start.sh"]

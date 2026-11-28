@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# source ./scripts/activate.sh
 set -euo pipefail
 
 # Определяем, где лежит сам скрипт, даже при source

@@ -1,4 +1,5 @@
 # configs/docker-compose.yml
+#  General docker-compose reused for every other 
 name: dlai
 services:
   web:
@@ -59,7 +60,7 @@ services:
     # «нет прокси в окружении → локально» (ai/env_mode.py) — тогда проверяется
     # только Daphne. С прокси (prod) и без флага — прежняя проверка байт-в-байт.
     healthcheck:
-      test: ["CMD-SHELL", "if [ \"$$AI_POOL_HEALTHCHECK_DISABLED\" = \"1\" ] || { [ -z \"$$HTTP_PROXY\" ] && [ -z \"$$HTTPS_PROXY\" ]; }; then curl -fsS http://localhost:8000/health >/dev/null; else curl -fsS http://localhost:8000/health >/dev/null && python3 -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:3000/health', timeout=5)); k=json.load(urllib.request.urlopen('http://localhost:3001/health', timeout=5)); sys.exit(0 if d.get('ok') and d.get('ready_count',0) > 0 and k.get('ok') else 1)\"; fi"]
+      test: ["$CMD_BASH"]
       interval: 30s
       timeout: 10s
       retries: 10

@@ -1,0 +1,1 @@
+["CMD-SHELL", "sh app/configs/web_healthcheck.sh"]
