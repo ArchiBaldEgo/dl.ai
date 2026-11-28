@@ -1,0 +1,8 @@
+<div class="check-ai-batch-content" data-done="{% if done %}true{% endif %}">
+  <h2 style="overflow-wrap: anywhere">{{ batch.display_name }}</h2>
+  <p role="status">Обработано {{ finished }} из {{ total }}{% if batch.skipped_count %}. Пропущено {{ batch.skipped_count }}{% endif %}.</p>
+  <p class="help">Средний процент ИИ считается по успешно проверенным файлам во всех подпапках. Оценка Pangram может быть неточной для исходного кода.</p>
+  <div class="check-ai-result-tree">
+    {% include "admin/ai/_check_ai_batch_tree.html" with node=tree only %}
+  </div>
+</div>

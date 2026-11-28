@@ -63,13 +63,13 @@ def _percent(result, field):
     return round(value * 100, 1)
 
 
-def check_text(text):
+def check_text(text, *, wait_seconds=_WAIT_SECONDS):
     api_key = os.getenv("PANGRAM_API_KEY", "").strip()
     if not api_key:
         raise PangramError(503, "На сервере не задан PANGRAM_API_KEY.")
 
     # Pangram сначала выдаёт номер задачи. Ждём результат в пределах одного таймаута.
-    deadline = monotonic() + _WAIT_SECONDS
+    deadline = monotonic() + wait_seconds
     task = _request(
         "POST", _TASK_URL, api_key, deadline,
         json={"text": text, "model": "pangram-4", "public_dashboard_link": False},

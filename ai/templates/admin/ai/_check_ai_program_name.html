@@ -1,0 +1,5 @@
+{% if item.is_suspicious and item.source_available %}
+  <a href="{% url 'ai_check_ai_source' item.pk %}">{{ label }}</a>
+{% else %}
+  {{ label }}
+{% endif %}

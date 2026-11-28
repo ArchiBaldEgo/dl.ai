@@ -516,9 +516,38 @@
         ],
 
         admin_check_ai: [
-            { sel: "#id_text", title: "Текст решения", text: "Вставь сюда код для проверки.", pos: "bottom" },
-            { sel: "#id_file", title: "Файл решения", text: "Если код в файле, выбери его здесь. Файл должен содержать текст и весить до 1 МиБ.", pos: "bottom" },
-            { sel: "#check-ai-submit", title: "Проверить", text: "Нажми, чтобы отправить решение в Pangram. Доли появятся под формой. Для короткого кода рядом будет предупреждение о точности.", pos: "top" }
+            { sel: ".check-ai-tabs", title: "Выбор режима", text: "«Одиночная» проверяет одно решение. «Пакетная» ставит несколько программ в очередь. «Протокол» показывает историю обоих видов проверок.", pos: "bottom" },
+            { sel: "#check-ai-form #id_name", title: "Название проверки", text: "Укажи название, чтобы найти одиночную проверку в протоколе. Поле можно оставить пустым.", pos: "bottom" },
+            { sel: "#id_text", title: "Текст решения", text: "Вставь код сюда и оставь поле файла пустым. Высоту окна можно изменить за нижний угол. Браузер запомнит её для твоей учётной записи.", pos: "bottom" },
+            { sel: "#id_file", title: "Файл решения", text: "Если решение сохранено в файле, выбери его здесь и оставь поле текста пустым. Поддерживаются текстовые файлы и исходники до 1 МиБ.", pos: "bottom" },
+            { sel: "#check-ai-submit", title: "Отправка на проверку", text: "Кнопка отправляет выбранный текст или файл в Pangram. Результат появится ниже формы.", pos: "top" },
+            { sel: "#check-ai-result", title: "Как читать результат", text: "Pangram оценивает доли текста, написанного ИИ, с помощью ИИ и человеком. Для коротких фрагментов вывод об авторстве ненадёжен. Проценты можно раскрыть вручную.", pos: "top" }
+        ],
+
+        admin_check_ai_batch: [
+            { sel: ".check-ai-tabs", title: "Разделы проверки", text: "Здесь можно поставить исходники в очередь или открыть прошлый пакет. Все пакеты доступны во вкладке «Протокол».", pos: "bottom" },
+            { sel: "#check-ai-new-batch", title: "Новая пакетная проверка", text: "Нажми, чтобы открыть форму для нового пакета.", pos: "bottom" },
+            { sel: "#check-ai-batch-form #id_name", title: "Название проверки", text: "Дай проверке название, чтобы найти её в истории. Если оставить поле пустым, пакет будет виден по номеру.", pos: "bottom" },
+            { sel: "#check-ai-folders", title: "Добавить папку", text: "Выбери папку с решениями. Подпапки сохранятся в результатах. Чтобы добавить ещё одну папку, повтори выбор.", pos: "bottom" },
+            { sel: "#check-ai-files", title: "Добавить отдельные файлы", text: "Выбери несколько программ, если проверять всю папку не нужно. Отдельные файлы можно добавить к уже выбранным папкам.", pos: "bottom" },
+            { sel: "#check-ai-selection", title: "Проверка выбранных файлов", text: "Сверь число выбранных и пропущенных файлов. Сюда попадают поддерживаемые исходники. Кнопка «Очистить выбор» сбрасывает список перед отправкой.", pos: "top" },
+            { sel: "#check-ai-batch-form [type=submit]", title: "Очередь проверок", text: "Кнопка ставит исходники в очередь Pangram. Файлы проверяются по одному, а очередь продолжит работать после закрытия страницы.", pos: "top" },
+            { sel: "#check-ai-batch-results [role=status]", title: "Ход проверки", text: "Счётчик показывает, сколько файлов уже обработано. Он обновляется сам по мере поступления результатов.", pos: "bottom" },
+            { sel: "#check-ai-batch-results .check-ai-result-tree > details > summary", title: "Папки и программы", text: "Раскрой папку или подпапку, чтобы увидеть оценки и время проверки отдельных программ. Папка показывает среднюю долю ИИ и среднюю длительность проверки файлов внутри неё.", pos: "bottom" },
+            { sel: "#check-ai-recent-batches h2", title: "Последние проверки", text: "Открой пакет по названию или номеру, чтобы увидеть прогресс, средние оценки по папкам и результаты отдельных программ.", pos: "top" }
+        ],
+
+        admin_check_ai_protocol: [
+            { sel: ".check-ai-tabs", title: "История проверок", text: "Здесь видны доступные тебе одиночные и пакетные проверки, включая старые пакеты и те, что ещё в очереди.", pos: "bottom" },
+            { sel: "#check-ai-protocol thead", title: "Что записано в протоколе", text: "Одна строка — одна проверка. Здесь указаны название, кто её запустил, московское время запуска и результат.", pos: "bottom" },
+            { sel: "#check-ai-protocol button[data-programs-url]", title: "Развернуть пакет", text: "Кнопка открывает дерево папок прямо в протоколе. Раскрывай папки по одной, чтобы увидеть оценки и время проверки каждой программы.", pos: "bottom" },
+            { sel: "#check-ai-protocol tbody td:nth-child(4)", title: "Как читать итог", text: "Итог показывает процент ИИ и число файлов. У пакета процент считается по успешно проверенным программам после завершения проверки.", pos: "bottom" },
+            { sel: "#check-ai-protocol .paginator", title: "Другие записи", text: "Перейди на следующую страницу, чтобы увидеть более ранние проверки.", pos: "top" }
+        ],
+
+        admin_check_ai_suspicious: [
+            { sel: "#check-ai-protocol thead", title: "Подозрительные программы", text: "Сюда попадают красные результаты с долей участия ИИ от 60%. Раскрой пакет и нужную папку, чтобы увидеть программы.", pos: "bottom" },
+            { sel: "#check-ai-protocol tbody", title: "Просмотр исходника", text: "Если исходник сохранён, название программы открывает страницу с её кодом.", pos: "top" }
         ]
     };
 
@@ -527,6 +556,8 @@
     var cfg = null;            // конфиг активации (scope/role/mark_url)
     var steps = [];            // шаги, прошедшие фильтр роли и наличия
     var index = -1;
+    var checkAiTour = null;
+    var CHECK_AI_TOUR_KEY = "ai_wizard:check_ai_continuation";
 
     var blocker = null;
     var spot = null;
@@ -633,7 +664,7 @@
         parts.btnSkip.textContent = currentLabels().skip;
         // Кнопка "Скрыть"
         parts.btnSkip.addEventListener("click", function () {
-          stop({ mark: true, disableWizard: true});
+          stop({ mark: true, disableWizard: !checkAiTour });
         });
 
         parts.btnPrev = document.createElement("button");
@@ -866,7 +897,7 @@
         interacted = true; // «Далее»/«Готово» — жест пользователя
         if (index + 1 < steps.length) {
             show(index + 1);
-        } else {
+        } else if (!continueCheckAiTour()) {
             stop({ mark: true });
         }
     }
@@ -880,11 +911,20 @@
     function renderContent(step) {
         parts.title.textContent = step.title || "";
         parts.text.textContent = step.text || "";
-        parts.progress.textContent = (index + 1) + currentLabels().progress + steps.length;
+        var progress = (index + 1) + currentLabels().progress + steps.length;
+        if (checkAiTour) {
+            var section = checkAiTour.total - checkAiTour.remaining.length;
+            progress = "Раздел " + section + " из " + checkAiTour.total + " · Шаг " + progress;
+        }
+        parts.progress.textContent = progress;
         parts.btnPrev.disabled = index === 0;
         var last = index === steps.length - 1;
-        parts.btnNext.textContent = last ? currentLabels().done : currentLabels().next;
-        parts.btnNext.className = last ? BTN_DONE : BTN_NEXT;
+        var nextTab = last ? nextCheckAiTab() : null;
+        var done = last && !nextTab;
+        parts.btnNext.textContent = nextTab
+            ? currentLabels().next + ": " + nextTab.textContent.trim()
+            : (done ? currentLabels().done : currentLabels().next);
+        parts.btnNext.className = done ? BTN_DONE : BTN_NEXT;
         // Вхождение — заново на каждом шаге (subtle).
         popover.classList.remove(POP_ENTER);
         void popover.offsetWidth; // reflow, чтобы анимация переигралась
@@ -1326,6 +1366,7 @@
         } catch (e) { /* ошибка локализации не валит тур */ }
 
         steps = resolved;
+        checkAiTour = conf.checkAiTour || null;
         cfg = {
             lang: ["chat", "solve", "find_error"].indexOf(scopeName) !== -1
                 ? uiSuffix(wizardUiLanguage()) : "ru",
@@ -1396,6 +1437,7 @@
         steps = [];
         index = -1;
         cfg = null;
+        checkAiTour = null;
     }
 
     function isActive() {
@@ -1422,6 +1464,65 @@
             : "";
         if (!scope) return null;
         return { scope: scope, version: 4, show: true, role: "", mark_url: "" };
+    }
+
+    function checkAiTabs() {
+        return Array.from(document.querySelectorAll(".check-ai-tabs [data-check-ai-section]"));
+    }
+
+    function newCheckAiTour() {
+        var tabs = checkAiTabs();
+        var current = tabs.findIndex(function (tab) {
+            return tab.getAttribute("aria-current") === "page";
+        });
+        if (current < 0) return null;
+
+        var destinations = tabs.slice(current + 1).concat(tabs.slice(0, current));
+        // Со страницы результатов сначала показываем форму новой пакетной проверки.
+        if (document.getElementById("check-ai-batch-results")) destinations.unshift(tabs[current]);
+        return {
+            remaining: destinations.map(function (tab) { return tab.dataset.checkAiSection; }),
+            total: destinations.length + 1
+        };
+    }
+
+    function nextCheckAiTab() {
+        if (!checkAiTour || !checkAiTour.remaining.length) return null;
+        return checkAiTabs().find(function (tab) {
+            return tab.dataset.checkAiSection === checkAiTour.remaining[0];
+        });
+    }
+
+    function continueCheckAiTour() {
+        var nextTab = nextCheckAiTab();
+        if (!nextTab) return false;
+        try {
+            sessionStorage.setItem(CHECK_AI_TOUR_KEY, JSON.stringify({
+                path: nextTab.pathname,
+                remaining: checkAiTour.remaining.slice(1),
+                total: checkAiTour.total,
+                expires: Date.now() + 60000
+            }));
+        } catch (e) {
+            return false;
+        }
+        stop({ mark: false });
+        window.location.assign(nextTab.href);
+        return true;
+    }
+
+    function takeCheckAiTour() {
+        try {
+            // Продолжение одноразовое и привязано к табу и целевой странице.
+            var saved = sessionStorage.getItem(CHECK_AI_TOUR_KEY);
+            if (!saved) return null;
+            sessionStorage.removeItem(CHECK_AI_TOUR_KEY);
+            var tour = JSON.parse(saved);
+            return tour && tour.path === window.location.pathname &&
+                tour.expires >= Date.now() && Array.isArray(tour.remaining) ? tour : null;
+        } catch (e) {
+            return null;
+        }
     }
 
     function restartTour(conf, scopeOverride) {
@@ -1463,6 +1564,7 @@
         
         if (!conf || !scope) return;
 
+        conf.checkAiTour = newCheckAiTour();
         restartTour(conf, scope);
     }
 
@@ -1512,6 +1614,12 @@
 
         document.addEventListener("click", onDelegatedClick);
         var conf = readConfig();
+        var checkAiContinuation = takeCheckAiTour();
+        if (conf && checkAiContinuation && checkAiTabs().length) {
+            conf.checkAiTour = checkAiContinuation;
+            start(conf.scope, conf);
+            return;
+        }
         if (!conf || conf.show !== true) return;
 
 

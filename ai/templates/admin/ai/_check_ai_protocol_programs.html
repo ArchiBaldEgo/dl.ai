@@ -1,0 +1,7 @@
+{% if tree.folders or tree.files %}
+  <div class="check-ai-result-tree">
+    {% include "admin/ai/_check_ai_batch_tree.html" with node=tree suspicious_only=suspicious_only protocol_view=True only %}
+  </div>
+{% else %}
+  <p>{% if suspicious_only %}В пакете нет подозрительных программ.{% else %}В пакете нет программ.{% endif %}</p>
+{% endif %}

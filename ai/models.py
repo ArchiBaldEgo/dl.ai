@@ -4,6 +4,7 @@ from django.db import models
 from django.db.models.functions import Upper
 from django.utils import timezone
 
+from .check_ai_results import is_suspicious_result
 from .i18n import get_localized_name, get_localized_text
 
 """Модели данных AI-приложения.
@@ -38,6 +39,60 @@ def replace_placeholders(base, language="", topic="", message="", code=""):
     if "{code}" in base:
         base = base.replace("{code}", code or "")
     return base
+
+
+class AICheckBatch(models.Model):
+    NAME_MAX_LENGTH = 120
+
+    class Kind(models.TextChoices):
+        BATCH = "batch", "Пакетная"
+        SINGLE = "single", "Одиночная"
+
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    checker_name = models.CharField(max_length=320)
+    skipped_count = models.PositiveIntegerField(default=0)
+    name = models.CharField(max_length=NAME_MAX_LENGTH, blank=True, default="")
+    submission_id = models.UUIDField(null=True, blank=True)
+    kind = models.CharField(max_length=6, choices=Kind.choices, default=Kind.BATCH)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["created_by", "submission_id"], name="ai_check_batch_submit_once"),
+        ]
+
+    @property
+    def display_name(self):
+        prefix = "Проверка" if self.kind == self.Kind.SINGLE else "Пакет"
+        return self.name or f"{prefix} №{self.pk}"
+
+
+class AICheckBatchFile(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = "queued", "В очереди"
+        RUNNING = "running", "Проверяется"
+        DONE = "done", "Проверен"
+        ERROR = "error", "Ошибка"
+
+    batch = models.ForeignKey(AICheckBatch, on_delete=models.CASCADE, related_name="files")
+    relative_path = models.CharField(max_length=1024)
+    status = models.CharField(max_length=8, choices=Status.choices, default=Status.QUEUED)
+    source_text = models.TextField(blank=True)
+    result = models.JSONField(default=dict, blank=True)
+    error = models.TextField(blank=True)
+    checked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    duration_seconds = models.FloatField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "id"], name="ai_check_file_queue_idx")]
+
+    @property
+    def filename(self):
+        return self.relative_path.rsplit("/", 1)[-1]
+
+    @property
+    def is_suspicious(self):
+        return self.status == self.Status.DONE and is_suspicious_result(self.result)
 
 
 class ExternalDLAccount(models.Model):

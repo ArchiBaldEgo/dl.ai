@@ -3,7 +3,7 @@
 
 {% block extrastyle %}
   {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=4">
+  <link rel="stylesheet" href="{% static 'admin/ai/check_ai/index.css' %}?v=6">
 {% endblock %}
 
 {% block extrahead %}
@@ -12,6 +12,7 @@
 {% endblock %}
 
 {% block content %}
+{% include "admin/ai/_check_ai_tabs.html" with check_ai_tab="single" %}
 <form id="check-ai-form" data-user-id="{{ request.user.pk|stringformat:'s' }}"
       action="{% url 'ai_check_ai' %}" method="post" enctype="multipart/form-data">
   {% csrf_token %}
@@ -57,4 +58,5 @@
     {% if result.short_input %}</details>{% endif %}
   </section>
 {% endif %}
+
 {% endblock %}
